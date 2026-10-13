@@ -10,6 +10,7 @@ package machine
 #cgo darwin LDFLAGS: -lc++
 #cgo linux LDFLAGS: -lstdc++ -lm
 #include "rv.h"
+#include "rv_trace.h"
 */
 import "C"
 
@@ -140,6 +141,45 @@ type Exit struct {
 	Instret   uint64
 	TimerStep uint64
 }
+
+// TraceRecord mirrors rv_trace_record (core/include/rv_trace.h). Its layout
+// is checked against the C struct in tests.
+type TraceRecord struct {
+	PC       uint64
+	Insn     uint32
+	Kind     uint8 // TraceCommit or TraceTrap
+	Priv     uint8
+	InsnLen  uint8
+	Flags    uint8 // TraceFlag*
+	Rd       uint8
+	MemSize  uint8
+	CSR      uint16
+	_        uint32
+	RdValue  uint64 // TraceTrap: cause
+	CSRValue uint64 // TraceTrap: handler pc
+	MemAddr  uint64 // TraceTrap: tval
+	MemValue uint64
+}
+
+// Compile-time checks that TraceRecord matches rv_trace_record: indexing a
+// one-element array with a non-zero (or wrapped negative) constant fails to compile.
+var (
+	_ = [1]struct{}{}[unsafe.Sizeof(TraceRecord{})-unsafe.Sizeof(C.rv_trace_record{})]
+	_ = [1]struct{}{}[unsafe.Offsetof(TraceRecord{}.CSR)-unsafe.Offsetof(C.rv_trace_record{}.csr)]
+	_ = [1]struct{}{}[unsafe.Offsetof(TraceRecord{}.RdValue)-unsafe.Offsetof(C.rv_trace_record{}.rd_value)]
+	_ = [1]struct{}{}[unsafe.Offsetof(TraceRecord{}.MemValue)-unsafe.Offsetof(C.rv_trace_record{}.mem_value)]
+)
+
+// Trace record kinds and flags.
+const (
+	TraceCommit = uint8(C.RV_TRACE_COMMIT)
+	TraceTrap   = uint8(C.RV_TRACE_TRAP)
+
+	TraceFlagRd    = uint8(C.RV_TF_RD)
+	TraceFlagCSR   = uint8(C.RV_TF_CSR)
+	TraceFlagLoad  = uint8(C.RV_TF_LOAD)
+	TraceFlagStore = uint8(C.RV_TF_STORE)
+)
 
 // Register numbers for Reg/SetReg (RV_REG_*). GPRs are 0..31.
 const (
@@ -315,4 +355,39 @@ func (m *Machine) RAM() []byte {
 	var n C.uint64_t
 	p := C.rv_ram_view(m.p, &n)
 	return unsafe.Slice((*byte)(unsafe.Pointer(p)), int(n))
+}
+
+// EnableTrace allocates a trace buffer of capacityBytes in the core, or
+// disables tracing when capacityBytes is 0.
+func (m *Machine) EnableTrace(capacityBytes int) error {
+	if m.p == nil {
+		return ErrClosed
+	}
+	return check("trace_enable", C.rv_trace_enable(m.p, C.size_t(capacityBytes)))
+}
+
+// TraceRecords returns the buffered trace records. The slice aliases C memory
+// and is valid only until the next ConsumeTrace, Run, or Close.
+func (m *Machine) TraceRecords() ([]TraceRecord, error) {
+	if m.p == nil {
+		return nil, ErrClosed
+	}
+	var data *C.uint8_t
+	var n C.size_t
+	if err := check("trace_peek", C.rv_trace_peek(m.p, &data, &n)); err != nil {
+		return nil, err
+	}
+	count := int(n) / int(unsafe.Sizeof(TraceRecord{}))
+	if count == 0 {
+		return nil, nil
+	}
+	return unsafe.Slice((*TraceRecord)(unsafe.Pointer(data)), count), nil
+}
+
+// ConsumeTrace empties the trace buffer.
+func (m *Machine) ConsumeTrace() error {
+	if m.p == nil {
+		return ErrClosed
+	}
+	return check("trace_consume", C.rv_trace_consume(m.p))
 }

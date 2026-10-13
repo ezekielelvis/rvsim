@@ -2,6 +2,7 @@ package machine
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -18,15 +19,53 @@ func newTestMachine(t testing.TB) *Machine {
 	return m
 }
 
-func TestRunRoundTrip(t *testing.T) {
+// putInsns writes little-endian 32-bit instructions at addr.
+func putInsns(t *testing.T, m *Machine, addr uint64, insns ...uint32) {
+	t.Helper()
+	buf := make([]byte, 4*len(insns))
+	for i, w := range insns {
+		binary.LittleEndian.PutUint32(buf[4*i:], w)
+	}
+	if err := m.WritePhys(addr, buf); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunToHTIFHalt(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RAMSize = 16 << 20
+	cfg.HTIFToHost = 0x8000_1000
+	m, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	putInsns(t, m, 0x8000_0000,
+		0x02a00293, // addi t0, zero, 42
+		0x00533023, // sd   t0, 0(t1)
+	)
+	if err := m.SetReg(6, 0x8000_1000); err != nil { // t1 = tohost
+		t.Fatal(err)
+	}
+	exit, err := m.Run(1000)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := Exit{Reason: ExitHalt, Addr: 0x8000_1000, Value: 42, PC: 0x8000_0008, Steps: 2, Instret: 2, TimerStep: ^uint64(0)}
+	if exit != want {
+		t.Fatalf("Run exit = %+v, want %+v", exit, want)
+	}
+}
+
+func TestBudgetFromEmptyRAM(t *testing.T) {
 	m := newTestMachine(t)
 	exit, err := m.Run(1000)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	want := Exit{Reason: ExitHalt, PC: 0x8000_0000, TimerStep: ^uint64(0)}
-	if exit != want {
-		t.Fatalf("Run exit = %+v, want %+v", exit, want)
+	// Zeroed RAM is illegal instructions: every step is a trap.
+	if exit.Reason != ExitBudget || exit.Steps != 1000 || exit.Instret != 0 {
+		t.Fatalf("Run exit = %+v, want budget exit after 1000 steps, 0 retired", exit)
 	}
 }
 
@@ -80,7 +119,7 @@ func TestRegisters(t *testing.T) {
 		{"x1", 1, 0x1234, 0x1234},
 		{"x31", 31, ^uint64(0), ^uint64(0)},
 		{"pc", RegPC, 0x8000_1000, 0x8000_1000},
-		{"priv S", RegPriv, 1, 1},
+		{"priv U", RegPriv, 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,8 +138,11 @@ func TestRegisters(t *testing.T) {
 	if _, err := m.Reg(34); !errors.Is(err, StatusRange) {
 		t.Fatalf("Reg(34) err = %v, want %v", err, StatusRange)
 	}
-	if _, err := m.Reg(RegCSR(0x300)); !errors.Is(err, StatusUnsupported) {
-		t.Fatalf("Reg(mstatus) err = %v, want %v", err, StatusUnsupported)
+	if v, err := m.Reg(RegCSR(0x300)); err != nil || v != 2<<32 {
+		t.Fatalf("Reg(mstatus) = %#x, %v; want UXL=2 only", v, err)
+	}
+	if _, err := m.Reg(RegCSR(0x7c0)); !errors.Is(err, StatusRange) {
+		t.Fatalf("Reg(unimplemented CSR) err = %v, want %v", err, StatusRange)
 	}
 }
 
