@@ -26,6 +26,9 @@ endif()
 # exceptions or RTTI so nothing can unwind across the C ABI.
 add_library(rvcore STATIC
   src/abi.cpp
+  src/cpu/execute.cpp
+  src/csr/csr.cpp
+  src/decode/decode.cpp
 )
 target_include_directories(rvcore
   PUBLIC include
@@ -47,8 +50,14 @@ if(RVSIM_BUILD_TESTS)
   enable_testing()
   add_executable(rvcore_tests
     tests/abi_test.cpp
+    tests/alu_test.cpp
+    tests/control_test.cpp
+    tests/decode_test.cpp
     tests/header_c_test.c
+    tests/memory_test.cpp
+    tests/system_test.cpp
   )
+  target_include_directories(rvcore_tests PRIVATE src)
   set_source_files_properties(tests/header_c_test.c PROPERTIES COMPILE_OPTIONS "-std=c11;-Wall;-Wextra;-Werror")
   target_link_libraries(rvcore_tests PRIVATE rvcore GTest::gtest_main)
   target_compile_options(rvcore_tests PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${RVSIM_WARNINGS}>)

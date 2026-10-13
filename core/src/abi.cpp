@@ -1,8 +1,10 @@
-// extern "C" entry points declared in rv.h. Validation lives here; the
-// execution engine (Phase 1+) is called from rv_run.
+// extern "C" entry points declared in rv.h. Argument validation lives here;
+// execution is in cpu/execute.cpp.
 #include <cstring>
+#include <initializer_list>
 #include <new>
 
+#include "csr/csr.hpp"
 #include "machine.hpp"
 #include "rv.h"
 
@@ -25,30 +27,22 @@ bool valid_config(const rv_config& c) {
   if (c.clint_base < c.ram_base + c.ram_size && c.ram_base < c.clint_base + kClintSize) {
     return false;
   }
+  // HTIF mailboxes are 8-byte words in RAM.
+  for (uint64_t a : {c.htif_tohost, c.htif_fromhost}) {
+    if (a == 0) continue;
+    if (a % 8 != 0 || a < c.ram_base || a - c.ram_base > c.ram_size - 8) return false;
+  }
   return true;
 }
 
 void reset_state(rv_machine* m) {
-  std::memset(m->x, 0, sizeof(m->x));
-  m->pc = m->cfg.reset_pc;
-  m->priv = 3;
-  m->steps = 0;
-  m->instret = 0;
+  rv::reset_hart(m);
   m->irq_lines = 0;
   m->irq_suppress = 0;
   m->mmio_pending = false;
   m->in_wfi = false;
   m->poisoned = false;
   m->exit = rv_exit{};
-}
-
-void fill_exit(rv_machine* m, rv_exit_reason reason) {
-  m->exit = rv_exit{};
-  m->exit.reason = reason;
-  m->exit.pc = m->pc;
-  m->exit.steps = m->steps;
-  m->exit.instret = m->instret;
-  m->exit.timer_step = UINT64_MAX;  // No CLINT yet (Phase 4).
 }
 
 }  // namespace
@@ -90,12 +84,7 @@ int rv_run(rv_machine* m, uint64_t max_steps) {
   if (m == nullptr) return RV_E_INVAL;
   if (m->poisoned) return RV_E_POISONED;
   if (m->mmio_pending) return RV_E_STATE;
-  if (max_steps == 0) {
-    fill_exit(m, RV_EXIT_BUDGET);
-    return RV_OK;
-  }
-  // Phase 0 stub: no execution engine yet; report completion immediately.
-  fill_exit(m, RV_EXIT_HALT);
+  rv::run(m, max_steps);
   return RV_OK;
 }
 
@@ -129,13 +118,13 @@ int rv_set_irq_mask(rv_machine* m, uint64_t suppress) {
 int rv_get_reg(const rv_machine* m, uint32_t reg, uint64_t* out) {
   if (m == nullptr || out == nullptr) return RV_E_INVAL;
   if (reg < 32) {
-    *out = m->x[reg];
+    *out = m->hart.x[reg];
   } else if (reg == RV_REG_PC) {
-    *out = m->pc;
+    *out = m->hart.pc;
   } else if (reg == RV_REG_PRIV) {
-    *out = m->priv;
+    *out = m->hart.priv;
   } else if (reg >= RV_REG_CSR && reg <= RV_REG_CSR + 0xfff) {
-    return RV_E_UNSUPPORTED;  // CSR file arrives in Phase 3.
+    if (!rv::csr_read(m, static_cast<uint16_t>(reg - RV_REG_CSR), *out)) return RV_E_RANGE;
   } else {
     return RV_E_RANGE;
   }
@@ -146,15 +135,18 @@ int rv_set_reg(rv_machine* m, uint32_t reg, uint64_t value) {
   if (m == nullptr) return RV_E_INVAL;
   if (reg < 32) {
     // Unpriv §2.1: x0 is hardwired to zero; writes are ignored.
-    if (reg != 0) m->x[reg] = value;
+    if (reg != 0) m->hart.x[reg] = value;
   } else if (reg == RV_REG_PC) {
-    m->pc = value;
+    m->hart.pc = value;
   } else if (reg == RV_REG_PRIV) {
-    // Priv §1.2: encoding 2 is reserved (H-mode not implemented).
-    if (value != 0 && value != 1 && value != 3) return RV_E_INVAL;
-    m->priv = static_cast<uint32_t>(value);
+    // Only implemented modes: M and U until S-mode arrives in Phase 3.
+    if (value != rv::kPrivM && value != rv::kPrivU) return RV_E_INVAL;
+    m->hart.priv = static_cast<rv::Priv>(value);
   } else if (reg >= RV_REG_CSR && reg <= RV_REG_CSR + 0xfff) {
-    return RV_E_UNSUPPORTED;
+    const auto csr = static_cast<uint16_t>(reg - RV_REG_CSR);
+    uint64_t unused = 0;
+    if (!rv::csr_read(m, csr, unused)) return RV_E_RANGE;
+    if (!rv::csr_write(m, csr, value)) return RV_E_INVAL;  // read-only
   } else {
     return RV_E_RANGE;
   }
@@ -196,19 +188,34 @@ int rv_remove_breakpoint(rv_machine* m, uint32_t) {
   return RV_E_UNSUPPORTED;
 }
 
-int rv_trace_enable(rv_machine* m, size_t) {
+int rv_trace_enable(rv_machine* m, size_t capacity_bytes) {
   if (m == nullptr) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+  std::free(m->trace);
+  m->trace = nullptr;
+  m->trace_cap = 0;
+  m->trace_len = 0;
+  if (capacity_bytes == 0) return RV_OK;
+  const size_t records = capacity_bytes / sizeof(rv_trace_record);
+  if (records == 0) return RV_E_INVAL;
+  m->trace = static_cast<rv_trace_record*>(std::malloc(records * sizeof(rv_trace_record)));
+  if (m->trace == nullptr) return RV_E_NOMEM;
+  m->trace_cap = records;
+  return RV_OK;
 }
 
 int rv_trace_peek(const rv_machine* m, const uint8_t** data, size_t* len) {
   if (m == nullptr || data == nullptr || len == nullptr) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+  if (m->trace == nullptr) return RV_E_STATE;
+  *data = reinterpret_cast<const uint8_t*>(m->trace);
+  *len = m->trace_len * sizeof(rv_trace_record);
+  return RV_OK;
 }
 
 int rv_trace_consume(rv_machine* m) {
   if (m == nullptr) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+  if (m->trace == nullptr) return RV_E_STATE;
+  m->trace_len = 0;
+  return RV_OK;
 }
 
 int rv_core_snapshot_size(const rv_machine* m, size_t* size_out) {

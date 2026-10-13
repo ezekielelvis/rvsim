@@ -1,5 +1,4 @@
-// Tests for the C ABI surface in rv.h: argument validation, lifecycle, and
-// the Phase 0 run stub.
+// Tests for the C ABI surface in rv.h: argument validation and lifecycle.
 #include <gtest/gtest.h>
 
 #include <array>
@@ -80,16 +79,21 @@ INSTANTIATE_TEST_SUITE_P(
         BadConfigCase{"ClintOverlapsRam", [](rv_config& c) { c.clint_base = 0x8000'0000; }},
         BadConfigCase{"ZeroStepsPerTick", [](rv_config& c) { c.steps_per_tick = 0; }},
         BadConfigCase{"UnknownFlag", [](rv_config& c) { c.flags = 1u << 31; }},
-        BadConfigCase{"NonZeroReserved", [](rv_config& c) { c.reserved[3] = 1; }}),
+        BadConfigCase{"NonZeroReserved", [](rv_config& c) { c.reserved[3] = 1; }},
+        BadConfigCase{"ToHostOutsideRam", [](rv_config& c) { c.htif_tohost = 0x1000; }},
+        BadConfigCase{"ToHostUnaligned", [](rv_config& c) { c.htif_tohost = 0x8000'1004; }},
+        BadConfigCase{"FromHostPastEndOfRam",
+                      [](rv_config& c) { c.htif_fromhost = c.ram_base + c.ram_size; }}),
     [](const ::testing::TestParamInfo<BadConfigCase>& p) { return p.param.name; });
 
-TEST_F(Machine, StubRunHalts) {
+TEST_F(Machine, RunFromEmptyRamReportsBudget) {
+  // Zeroed RAM decodes as illegal instructions; the hart traps forever but
+  // every trap is a step, so the budget is still honoured.
   ASSERT_EQ(rv_run(m_, 1000), RV_OK);
   const rv_exit* e = rv_exit_info(m_);
   ASSERT_NE(e, nullptr);
-  EXPECT_EQ(e->reason, RV_EXIT_HALT);
-  EXPECT_EQ(e->pc, 0x8000'0000u);
-  EXPECT_EQ(e->steps, 0u);
+  EXPECT_EQ(e->reason, RV_EXIT_BUDGET);
+  EXPECT_EQ(e->steps, 1000u);
   EXPECT_EQ(e->instret, 0u);
   EXPECT_EQ(e->timer_step, UINT64_MAX);
 }
@@ -136,13 +140,25 @@ TEST_F(Machine, PrivResetsToMachineAndRejectsReservedEncoding) {
   ASSERT_EQ(rv_get_reg(m_, RV_REG_PRIV, &v), RV_OK);
   EXPECT_EQ(v, 3u);
   EXPECT_EQ(rv_set_reg(m_, RV_REG_PRIV, 2), RV_E_INVAL);
-  EXPECT_EQ(rv_set_reg(m_, RV_REG_PRIV, 1), RV_OK);
+  EXPECT_EQ(rv_set_reg(m_, RV_REG_PRIV, 1), RV_E_INVAL);  // no S-mode yet
+  EXPECT_EQ(rv_set_reg(m_, RV_REG_PRIV, 0), RV_OK);
 }
 
 TEST_F(Machine, UnknownRegisterIsRangeError) {
   uint64_t v = 0;
   EXPECT_EQ(rv_get_reg(m_, 34, &v), RV_E_RANGE);
   EXPECT_EQ(rv_set_reg(m_, RV_REG_CSR + 0x1000, 0), RV_E_RANGE);
+  EXPECT_EQ(rv_get_reg(m_, RV_REG_CSR + 0x7c0, &v), RV_E_RANGE);  // unimplemented CSR
+}
+
+TEST_F(Machine, DebuggerCsrAccess) {
+  uint64_t v = 1;
+  ASSERT_EQ(rv_get_reg(m_, RV_REG_CSR + 0xf14, &v), RV_OK);  // mhartid
+  EXPECT_EQ(v, 0u);
+  EXPECT_EQ(rv_set_reg(m_, RV_REG_CSR + 0xf14, 1), RV_E_INVAL);  // read-only
+  ASSERT_EQ(rv_set_reg(m_, RV_REG_CSR + 0x340, 0xabc), RV_OK);    // mscratch
+  ASSERT_EQ(rv_get_reg(m_, RV_REG_CSR + 0x340, &v), RV_OK);
+  EXPECT_EQ(v, 0xabcu);
 }
 
 TEST_F(Machine, PhysMemoryRoundTrip) {
