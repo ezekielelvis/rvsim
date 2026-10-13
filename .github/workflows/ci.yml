@@ -58,3 +58,25 @@ jobs:
         run: make sanitize
       - name: Go tests against sanitized core
         run: make go-asan
+
+  compliance:
+    name: riscv-tests + Spike difftest
+    runs-on: ubuntu-24.04
+    env:
+      RVSIM_REQUIRE_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Cache pinned Spike
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rvsim-tools
+          key: spike-${{ runner.os }}-${{ hashFiles('scripts/toolchain.sh') }}
+      - name: Install toolchains and build Spike
+        run: scripts/toolchain.sh --install
+      - name: Compliance
+        run: make compliance
+      - name: Difftest against Spike
+        run: make difftest

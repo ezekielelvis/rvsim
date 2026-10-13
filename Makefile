@@ -7,7 +7,7 @@ JOBS       ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 GO         ?= go
 CMAKE      ?= cmake
 
-.PHONY: all core core-test go-build go-test lint test sanitize go-asan bench toolchain clean
+.PHONY: all core core-test go-build go-test lint test sanitize go-asan riscv-tests compliance difftest bench toolchain clean
 
 all: go-build
 
@@ -44,6 +44,18 @@ go-asan:
 	$(CMAKE) -S core -B $(CORE_BUILD) -DCMAKE_BUILD_TYPE=Debug -DRVSIM_SANITIZE=ON -DRVSIM_BUILD_TESTS=OFF
 	$(CMAKE) --build $(CORE_BUILD) -j $(JOBS)
 	CGO_LDFLAGS=-fsanitize=undefined $(GO) test -asan -count=1 ./...
+
+## riscv-tests: fetch (pinned) and build the riscv-tests suites into $(BUILD)/riscv-tests
+riscv-tests:
+	tests/compliance/build-riscv-tests.sh $(BUILD)/riscv-tests
+
+## compliance: run the riscv-tests suites on rvsim
+compliance: core riscv-tests
+	$(GO) test -count=1 ./tests/compliance
+
+## difftest: compare commit logs against the pinned Spike, report the first divergence
+difftest: core riscv-tests
+	$(GO) test -count=1 ./tests/difftest
 
 bench: core
 	$(GO) test -run '^$$' -bench . -benchmem ./...
