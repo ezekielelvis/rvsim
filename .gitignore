@@ -1,0 +1,5 @@
+/build/
+/bin/
+*.dtb
+/tests/images/out/
+.DS_Store
