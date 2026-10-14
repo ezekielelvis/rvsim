@@ -23,6 +23,7 @@ constexpr uint64_t kData2 = kRamBase + 0x31000;
 class Mmu : public Cpu {
  protected:
   void SetUp() override {
+    flags_ |= RV_CFG_HW_AD_UPDATE;  // Svadu implemented; ADUE still resets to 0
     Cpu::SetUp();
     next_table_ = kTables + 0x1000;
     root_ = kTables;
@@ -271,6 +272,12 @@ TEST_F(Mmu, SvaduSetsAccessedAndDirty) {
   run(1);
   EXPECT_EQ(mem<uint64_t>(pte_addr(0x1000)) & (A | D), A | D);
   EXPECT_EQ(pc(), kRamBase + 8);
+}
+
+// Without RV_CFG_HW_AD_UPDATE the hart is Svade only: ADUE is read-only zero.
+TEST_F(Cpu, AdueIsReadOnlyZeroWithoutSvadu) {
+  set_csr(kMenvcfg, kADUE | 1);
+  EXPECT_EQ(csr(kMenvcfg), 1u);  // FIOM kept, ADUE dropped
 }
 
 TEST_F(Mmu, PteOutsideRamIsAccessFault) {

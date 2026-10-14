@@ -42,7 +42,7 @@ typedef enum {
 } rv_status;
 
 /* ---------------- configuration ---------------- */
-#define RV_CFG_HW_AD_UPDATE  (1u << 0) /* hardware sets PTE A/D; else page fault (Priv 1.12 §4.3.1) */
+#define RV_CFG_HW_AD_UPDATE  (1u << 0) /* implement Svadu: menvcfg.ADUE is writable; else Svade only */
 #define RV_CFG_MISALIGNED_OK (1u << 1) /* perform misaligned RAM accesses; else trap (Unpriv §2.6) */
 #define RV_CFG_ALL_FLAGS     (RV_CFG_HW_AD_UPDATE | RV_CFG_MISALIGNED_OK)
 

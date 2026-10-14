@@ -174,8 +174,14 @@ bool csr_write(rv_machine* m, uint16_t csr, uint64_t v) {
       if ((v & 3) < 2) c.mtvec = v;
       return true;
     case csrno::kMcounteren: c.mcounteren = v & kCounterenWritable; return true;
-    // FIOM, and ADUE (Svadu) to choose hardware A/D updates (ADR-025).
-    case csrno::kMenvcfg: c.menvcfg = v & (kEnvcfgFIOM | kMenvcfgADUE); return true;
+    // FIOM, and ADUE to choose hardware A/D updates when Svadu is
+    // implemented (RV_CFG_HW_AD_UPDATE); otherwise ADUE is read-only zero
+    // and the hart is Svade only (ADR-025).
+    case csrno::kMenvcfg: {
+      const uint64_t adue = (m->cfg.flags & RV_CFG_HW_AD_UPDATE) != 0 ? kMenvcfgADUE : 0;
+      c.menvcfg = v & (kEnvcfgFIOM | adue);
+      return true;
+    }
     case csrno::kMcountinhibit: c.mcountinhibit = v & kCountinhibitWritable; return true;
     case csrno::kMscratch: c.mscratch = v; return true;
     case csrno::kMepc: c.mepc = v & ~1ull; return true;

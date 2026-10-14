@@ -101,7 +101,7 @@ type Config struct {
 }
 
 // DefaultConfig returns the QEMU-virt-compatible memory map (ADR-002) with
-// 256 MiB of RAM and hardware A/D updates (ADR-003).
+// 256 MiB of RAM and Svadu available (ADR-025).
 func DefaultConfig() Config {
 	return Config{
 		Flags:        FlagHWADUpdate,
