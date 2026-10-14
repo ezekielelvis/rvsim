@@ -117,5 +117,36 @@ jobs:
         env:
           CONTAINER_ENGINE: docker
         run: make images
-      - name: Boot Linux to a shell
+      - name: Boot Linux; record and replay a session
+        env:
+          RVSIM_RECORDING_OUT: ${{ github.workspace }}/build/session.rvrec
         run: make linux
+      - name: Hand the recording and images to the replay job
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-session
+          path: |
+            build/session.rvrec
+            build/images/fw_jump.bin
+            build/images/Image
+            build/images/rootfs.ext4
+          retention-days: 7
+
+  replay-elsewhere:
+    name: Replay the Linux session on macOS
+    needs: linux
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-session
+          path: build
+      - name: Replay the session recorded on Linux, 10 times
+        env:
+          RVSIM_REQUIRE_LINUX: 1
+          RVSIM_REPLAY: ${{ github.workspace }}/build/session.rvrec
+        run: make core && go test -count=1 -v -timeout 60m -run TestReplayRecordingFromAnotherMachine ./tests/linux
