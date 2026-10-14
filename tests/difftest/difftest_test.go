@@ -38,7 +38,8 @@ func spikePath(t *testing.T) string {
 
 func TestAgainstSpike(t *testing.T) {
 	spike := spikePath(t)
-	for _, tc := range riscvtests.List(t, "rv64ui-p-", "rv64um-p-", "rv64ua-p-", "rv64uc-p-", "rv64mi-p-", "rv64si-p-") {
+	for _, tc := range riscvtests.List(t, "rv64ui-p-", "rv64um-p-", "rv64ua-p-", "rv64uc-p-", "rv64mi-p-", "rv64si-p-",
+		"rv64ui-v-", "rv64um-v-", "rv64ua-v-", "rv64uc-v-") {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 			riscvtests.SkipIfUnsupported(t, tc)

@@ -9,7 +9,10 @@ import (
 )
 
 // suites are the riscv-tests prefixes rvsim must pass in the current phase.
-var suites = []string{"rv64ui-p-", "rv64um-p-", "rv64ua-p-", "rv64uc-p-", "rv64mi-p-", "rv64si-p-"}
+var suites = []string{
+	"rv64ui-p-", "rv64um-p-", "rv64ua-p-", "rv64uc-p-", "rv64mi-p-", "rv64si-p-",
+	"rv64ui-v-", "rv64um-v-", "rv64ua-v-", "rv64uc-v-",
+}
 
 func TestRiscvTests(t *testing.T) {
 	for _, tc := range riscvtests.List(t, suites...) {

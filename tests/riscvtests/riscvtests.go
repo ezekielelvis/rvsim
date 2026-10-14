@@ -26,9 +26,9 @@ type Test struct {
 
 // baseISA is what rvsim implements in the current phase.
 const (
-	baseISA  = "rv64imac_zicsr_zifencei_zicntr"
+	baseISA  = "rv64imac_zicsr_zifencei_zicntr_svadu"
 	basePriv = "MSU"
-	baseMMU  = "riscv,sbare" // no MMU until Phase 5
+	baseMMU  = "riscv,sv39"
 )
 
 // needsMisaligned lists tests that require hardware misaligned access
@@ -36,15 +36,14 @@ const (
 // RV_CFG_MISALIGNED_OK and Spike runs with Zicclsm.
 var needsMisaligned = map[string]bool{
 	"rv64ui-p-ma_data": true,
+	"rv64ui-v-ma_data": true,
 }
 
 // unsupported lists tests that need features rvsim does not (yet) have.
 // They are reported as skipped, with the reason, rather than hidden.
 var unsupported = map[string]string{
-	"rv64mi-p-breakpoint":   "needs Sdtrig debug triggers, which rvsim does not implement",
-	"rv64mi-p-pmpaddr":      "needs PMP; rvsim implements no PMP entries (ADR-007)",
-	"rv64si-p-dirty":        "needs Sv39 (Phase 5)",
-	"rv64si-p-icache-alias": "needs Sv39 (Phase 5)",
+	"rv64mi-p-breakpoint": "needs Sdtrig debug triggers, which rvsim does not implement",
+	"rv64mi-p-pmpaddr":    "needs PMP; rvsim implements no PMP entries (ADR-007)",
 }
 
 // difftestUnsupported lists tests that pass on rvsim but cannot be compared
@@ -52,10 +51,6 @@ var unsupported = map[string]string{
 // different path.
 var difftestUnsupported = map[string]string{
 	"rv64mi-p-ma_fetch": "clears misa.C, which Spike allows and rvsim's read-only misa does not (ADR-016)",
-	// Until Sv39 (Phase 5): without an MMU Spike makes mstatus.MXR/TVM
-	// read-only and SFENCE.VMA illegal; rvsim follows Priv 1.12 §3.1.6.3/5,
-	// where they exist whenever S-mode does (ADR-016).
-	"rv64mi-p-illegal": "MXR/TVM/SFENCE.VMA without an MMU differ from Spike until Phase 5 (ADR-016)",
 }
 
 // SkipIfDifftestUnsupported skips t for tests listed in difftestUnsupported.

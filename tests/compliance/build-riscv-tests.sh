@@ -31,6 +31,14 @@ suite_march() {
   esac
 }
 
+# Suites that also have virtual-memory (-v-) variants.
+has_v() {
+  case $1 in
+    rv64ui | rv64um | rv64ua | rv64uc) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Tests for extensions rvsim does not implement (Zacas).
 skipped() {
   case $1 in
@@ -58,11 +66,39 @@ for suite in $suites; do
     sed "s/^${suite}_sc_tests = //" | tr -d '\\' | tr -s ' \t\n' ' ')
   for t in $tests; do
     if skipped "$t"; then continue; fi
-    "$cc" -march="$march" -mabi=lp64 -static -mcmodel=medany -fvisibility=hidden \
-      -nostdlib -nostartfiles \
-      -I"$src/env/p" -I"$src/isa/macros/scalar" -T"$src/env/p/link.ld" \
-      "$src/isa/$suite/$t.S" -o "$out/$suite-p-$t"
+    common=(-march="$march" -mabi=lp64 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles)
+    # -p-: physical memory, M-mode environment.
+    "$cc" "${common[@]}" -I"$src/env/p" -I"$src/isa/macros/scalar" -T"$src/env/p/link.ld" \
+      -Wl,--no-warn-rwx-segments "$src/isa/$suite/$t.S" -o "$out/$suite-p-$t"
     count=$((count + 1))
+    # -v-: the same test in U-mode under a demand-paging Sv39 supervisor.
+    if has_v "$suite"; then
+      name="$suite-v-$t"
+      # Upstream seeds page placement from md5 of the name; any fixed
+      # per-test value works, and cksum is portable.
+      sum=$(printf %s "$name" | cksum | cut -d' ' -f1)
+      entropy=$(printf '0x%07x' $((sum % 268435456)))
+      # env/v/vm.c embeds one F instruction as data (to recognize FP tests on
+      # non-FP hardware), so these builds need F in -march. The environment
+      # has no other FP code, which the check below enforces.
+      base=${march%%_*} exts=${march#*_}
+      if [[ $base == *c ]]; then base="${base%c}fc"; else base="${base}f"; fi
+      vcommon=(-march="${base}_${exts}" "${common[@]:1}")
+      "$cc" "${vcommon[@]}" -DENTROPY="$entropy" -std=gnu99 -O2 \
+        -I"$src/env/v" -I"$src/isa/macros/scalar" -T"$src/env/v/link.ld" \
+        -Wl,--no-warn-rwx-segments "$src/env/v/entry.S" "$src"/env/v/*.c "$src/isa/$suite/$t.S" -o "$out/$name"
+      count=$((count + 1))
+    fi
   done
+done
+# The -v- binaries must contain no FP instructions except vm.c's embedded
+# fssr, which is jumped over and only compared against.
+objdump=${RISCV_PREFIX:-riscv64-unknown-elf-}objdump
+for f in "$out"/*-v-*; do
+  n=$("$objdump" -d "$f" | awk -F'\t' 'NF >= 3 && $3 ~ /^f/ && $3 !~ /^fence/' | wc -l | tr -d ' ')
+  if [[ $n -gt 1 ]]; then
+    echo "$f contains $n FP instructions" >&2
+    exit 1
+  fi
 done
 echo "built $count tests into $out"
