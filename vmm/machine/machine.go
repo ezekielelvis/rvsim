@@ -386,6 +386,55 @@ func (m *Machine) RestoreCore(snap []byte) error {
 	return check("core_snapshot_load", C.rv_core_snapshot_load(m.p, unsafe.Pointer(&snap[0]), C.size_t(len(snap))))
 }
 
+// Breakpoint kinds (rv_add_breakpoint). Only execution breakpoints are
+// implemented.
+const (
+	BreakExec = uint32(C.RV_BP_EXEC)
+	BreakPhys = uint32(C.RV_BP_PHYS)
+)
+
+// AddBreakpoint stops rv_run before executing an instruction whose pc (or,
+// with BreakPhys, physical pc) is in [addr, addr+len). It is debugger
+// state: hashes and snapshots ignore it.
+func (m *Machine) AddBreakpoint(addr, length uint64, kind uint32) (uint32, error) {
+	if m.p == nil {
+		return 0, ErrClosed
+	}
+	var id C.uint32_t
+	if err := check("add_breakpoint", C.rv_add_breakpoint(m.p, C.uint64_t(addr), C.uint64_t(length), C.uint32_t(kind), &id)); err != nil {
+		return 0, err
+	}
+	return uint32(id), nil
+}
+
+// RemoveBreakpoint removes a breakpoint.
+func (m *Machine) RemoveBreakpoint(id uint32) error {
+	if m.p == nil {
+		return ErrClosed
+	}
+	return check("remove_breakpoint", C.rv_remove_breakpoint(m.p, C.uint32_t(id)))
+}
+
+// Access kinds for Translate.
+const (
+	AccRead  = uint32(C.RV_ACC_READ)
+	AccWrite = uint32(C.RV_ACC_WRITE)
+	AccExec  = uint32(C.RV_ACC_EXEC)
+)
+
+// Translate translates vaddr as the hart would now (current privilege,
+// satp, mstatus), without side effects.
+func (m *Machine) Translate(vaddr uint64, access uint32) (uint64, error) {
+	if m.p == nil {
+		return 0, ErrClosed
+	}
+	var pa C.uint64_t
+	if err := check("translate", C.rv_translate(m.p, C.uint64_t(vaddr), C.uint32_t(access), &pa)); err != nil {
+		return 0, err
+	}
+	return uint64(pa), nil
+}
+
 // What rv_state_hash covers.
 const (
 	HashCore = uint32(C.RV_HASH_CORE)

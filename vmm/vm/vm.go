@@ -71,8 +71,12 @@ type Result struct {
 	Exited   bool   // the guest exited through HTIF or the test finisher
 	ExitCode uint64 // HTIF exit code (tohost >> 1) or finisher failure code
 	Reset    bool   // the guest asked the finisher for a reset (with Exited)
-	Steps    uint64
-	Instret  uint64
+	// Breakpoint: the hart stopped at an execution breakpoint (BreakpointID),
+	// before executing the instruction at its pc.
+	Breakpoint   bool
+	BreakpointID uint32
+	Steps        uint64
+	Instret      uint64
 }
 
 // ErrIdleForever is returned when the hart waits for an interrupt that
@@ -454,6 +458,13 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 			if f := v.finished; f != nil {
 				return v.finishRun(*f)
 			}
+		case machine.ExitBreakpoint:
+			if err := v.flushTrace(); err != nil {
+				return v.result(false, 0), err
+			}
+			res := v.result(false, 0)
+			res.Breakpoint, res.BreakpointID = true, uint32(exit.Value)
+			return res, nil
 		case machine.ExitWFI:
 			if err := v.idle(exit, limit); err != nil {
 				return v.result(false, 0), err

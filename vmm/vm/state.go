@@ -3,6 +3,7 @@ package vm
 import (
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/ezekielelvis/rvsim/vmm/devices/virtio/blk"
 	"github.com/ezekielelvis/rvsim/vmm/sched"
@@ -108,6 +109,12 @@ func (v *VM) RestoreState(st *State) error {
 		}
 	}
 	return nil
+}
+
+// SetConsole redirects the UART's output.
+func (v *VM) SetConsole(w io.Writer) {
+	v.cfg.Console = w
+	v.uart.SetOutput(w)
 }
 
 // Disk returns the VM's virtio disk configuration, or nil.

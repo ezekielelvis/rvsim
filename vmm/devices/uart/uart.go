@@ -90,6 +90,9 @@ func New(out io.Writer, irq devices.IRQLine) *UART {
 	return u
 }
 
+// SetOutput redirects transmitted bytes to out.
+func (u *UART) SetOutput(out io.Writer) { u.out = out }
+
 // Reset implements devices.Device.
 func (u *UART) Reset() {
 	u.s = state{LSR: lsrTHRE | lsrTEMT}
