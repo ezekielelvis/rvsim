@@ -1,0 +1,6 @@
+These ACT4 configuration files are derived from riscv-arch-test's
+config/sail/sail-RVI20U64 (commit d40cf3db24cdb1611b26e07f37d97382d1e08d8c),
+https://github.com/riscv-non-isa/riscv-arch-test, and remain under that
+project's licences (BSD-3-Clause / Apache-2.0 as marked in each file).
+
+Changes for rvsim are described in docs/DECISIONS.md (ADR-014).

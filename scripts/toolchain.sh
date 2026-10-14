@@ -13,6 +13,7 @@ set -euo pipefail
 
 SPIKE_REPO=https://github.com/riscv-software-src/riscv-isa-sim.git
 SPIKE_COMMIT=cae29438a126b9ff76ad50dc9266483b6c94b0e5  # master, 2026-09-12
+SAIL_VERSION=0.14.1  # the version ACT4 (riscv-arch-test) is tested with
 GO_MIN=1.26
 RVSIM_TOOLS=${RVSIM_TOOLS:-$HOME/.cache/rvsim-tools}
 
@@ -28,7 +29,7 @@ os=$(uname -s)
 
 install_packages() {
   if [[ $os == Darwin ]]; then
-    brew install cmake dtc go
+    brew install cmake dtc go mise z3
     brew tap riscv-software-src/riscv
     brew install riscv-software-src/riscv/riscv-gnu-toolchain
   elif command -v apt-get >/dev/null; then
@@ -37,10 +38,32 @@ install_packages() {
       build-essential cmake git device-tree-compiler \
       gcc-riscv64-unknown-elf gcc-riscv64-linux-gnu \
       libboost-regex-dev libboost-system-dev
+    command -v mise >/dev/null || curl -fsSL https://mise.run | sh
   else
     echo "unsupported host: install tools manually" >&2
     exit 1
   fi
+}
+
+# Sail RISC-V reference model, used by ACT4 to compute expected results.
+install_sail() {
+  if [[ -x $RVSIM_TOOLS/bin/sail_riscv_sim && $("$RVSIM_TOOLS/bin/sail_riscv_sim" --version) == "$SAIL_VERSION" ]]; then
+    echo "sail $SAIL_VERSION already installed"
+    return
+  fi
+  local asset
+  case "$os-$(uname -m)" in
+    Darwin-arm64) asset=sail-riscv-Mac-arm64.tar.gz ;;
+    Linux-x86_64) asset=sail-riscv-Linux-x86_64.tar.gz ;;
+    Linux-aarch64) asset=sail-riscv-Linux-aarch64.tar.gz ;;
+    *) echo "no Sail $SAIL_VERSION build for $os-$(uname -m)" >&2; exit 1 ;;
+  esac
+  local dl
+  dl=$(mktemp -d)
+  curl -fsSL -o "$dl/sail.tar.gz" "https://github.com/riscv/sail-riscv/releases/download/$SAIL_VERSION/$asset"
+  mkdir -p "$RVSIM_TOOLS"
+  tar -xzf "$dl/sail.tar.gz" -C "$RVSIM_TOOLS" --strip-components=1
+  rm -rf "$dl"
 }
 
 build_spike() {
@@ -63,6 +86,7 @@ build_spike() {
 if [[ $mode == install ]]; then
   install_packages
   build_spike
+  install_sail
   mode=verify
 fi
 
@@ -108,6 +132,18 @@ echo "RISC-V tools (Phase 1+):"
 check riscv64-unknown-elf-gcc no "bare-metal tests" riscv64-unknown-elf-gcc --version
 check spike no "difftest; run --install" spike_version
 check dtc no "device tree validation (Phase 6)" dtc --version
+
+sail_version() {
+  command -v sail_riscv_sim >/dev/null || return 1
+  local v
+  v=$(sail_riscv_sim --version)
+  [[ $v == "$SAIL_VERSION" ]] || { echo "version $v, want $SAIL_VERSION"; return 1; }
+  echo "sail_riscv_sim $v"
+}
+
+echo "Architecture tests (ACT4):"
+check sail no "ACT4 reference model; run --install" sail_version
+check mise no "provisions ACT4's Ruby/uv; run --install" mise --version
 
 echo "Linux image builds (Phase 6+):"
 if [[ $os == Darwin ]]; then
