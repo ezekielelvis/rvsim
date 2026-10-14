@@ -1114,3 +1114,35 @@ a gain the target does not need.
 UART output exits cost about 0.3 µs a character (ADR-022's boundary
 numbers), negligible next to boot time, so batching them was not worth its
 complexity.
+
+---
+
+## ADR-033: Completing the CLI; the trace is flushed whenever Run returns
+
+**Status:** Accepted (Phase 13).
+
+**Commands.** The CLI has every command the brief lists, each with its own
+`-h`:
+
+- `run` and `boot`;
+- `record`, `replay`, `snapshot` and `restore`;
+- `gdb`;
+- `trace`;
+- `fault`.
+
+Two came last:
+
+- **`rvsim trace [-from N] [-to M] [-snapshot-dir D] session.rvrec`** writes
+  a Spike-format commit log of a window of a recording. It replays from the
+  nearest snapshot at or before `-from`. Divergence reports point here.
+  Tracing a live run is the `-trace` flag of `run`, `boot`, `restore` and
+  `replay`.
+- **`rvsim fault check spec.yaml`** validates a fault spec and explains each
+  rule in words. **`rvsim fault list session.rvrec`** prints the faults a
+  recording applied. Injection itself is `-faults` on `boot`, `record`,
+  `snapshot` and `gdb`.
+
+**Fix.** `vm.Run` flushed the commit-log writer only when the guest exited
+or hit a breakpoint. A run that stopped at its step limit could lose the
+tail of the trace: `trace`, `boot -max-steps`, `replay -trace`. `Run` now
+flushes on every return; a test pins it.
