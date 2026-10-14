@@ -344,8 +344,7 @@ so any other model shows up as a difftest divergence. So:
 
 ## ADR-016: S-mode before the MMU
 
-**Status:** Accepted (Phase 3; superseded for each field when Sv39 lands in
-Phase 5)
+**Status:** Superseded by ADR-025 (Phase 5). It described Phase 3–4.
 
 S-mode exists from Phase 3, but address translation only arrives in Phase 5.
 Until then:
@@ -545,3 +544,70 @@ cgo wrapper that only it imports.
 external interrupts through these real devices. The rvmodel macros enable the
 UART's THRE interrupt, which goes through the PLIC, following ACT4's CVW
 configuration. Supervisor software interrupts go through `mip.SSIP`.
+
+---
+
+## ADR-025: Sv39 MMU, Svade/Svadu and the TLB
+
+**Status:** Accepted (Phase 5). Refines ADR-003; supersedes the pre-MMU rules
+of ADR-016.
+
+**A/D bits: Svade and Svadu.** ADR-003 chose "hardware updates A/D", which
+Priv 1.12 allowed. Svadu has since been ratified and makes this a software
+choice:
+
+- `menvcfg.ADUE` resets to 0. With ADUE = 0, a clear A bit, or a clear D bit
+  on a store, raises a page fault (Svade).
+- With ADUE = 1, the walker sets the bits in the PTE.
+
+This matches Spike with `_svadu`, Sail with Svade+Svadu, and what OpenSBI and
+Linux probe for. The riscv-tests `dirty` test accepts either behaviour.
+
+**Walk** (Priv §4.3.2, matching Spike's fault rules). Each of these raises a
+page fault of the access type:
+- V clear, or W set without R;
+- any of PTE bits 63:54 set (no Svnapot, Svpbmt or reserved-bit extensions);
+- a non-leaf PTE with A, D or U set, or a non-leaf at level 0;
+- a misaligned superpage PPN;
+- a U-bit violation: S-mode touching a U page without SUM, or ever fetching
+  from one, or U-mode touching a supervisor page;
+- a non-canonical address (bits 63:39 not all equal to bit 38).
+
+A PTE outside RAM raises an access fault of the access type. `xtval` holds the
+faulting virtual address.
+
+**Accesses.**
+- Loads and stores honour MPRV; fetches do not.
+- An instruction that straddles a page boundary translates each 16-bit
+  parcel's page separately, so a fault on the second page reports
+  `xtval = pc + 2` and `xepc = pc`.
+- Misaligned page-crossing data accesses (only with `RV_CFG_MISALIGNED_OK`)
+  translate both pages before writing anything.
+- LR translates as a load; SC and AMOs as stores. The reservation is held on
+  the physical address.
+
+**TLB.** 256 entries, direct-mapped, tagged with ASID (16 bits) and the global
+bit. Each entry caches a 4 KiB piece of a leaf, recording its level.
+
+- A hit is used only if the access is already permitted with A/D set.
+  Otherwise the walker re-reads memory, so a stale entry can never cause a
+  fault. This is Spike's behaviour.
+- SFENCE.VMA flushes:
+  - everything (rs1 = rs2 = x0);
+  - by address, removing the whole superpage containing it;
+  - by ASID, sparing global entries.
+- Any change to `satp` flushes everything (as Spike).
+
+**State unlocked by the MMU.**
+- `satp` accepts Bare and Sv39; other modes leave MODE unchanged.
+- `mstatus.SUM` becomes writable, and so does `menvcfg`/`senvcfg.FIOM`.
+- Page faults become delegable: `medeleg` mask 0xB3FE.
+- Physical addresses are 56 bits wide.
+
+**Tests.**
+- The riscv-tests `-v-` variants run user tests under the test environment's
+  demand-paging Sv39 supervisor.
+- That environment's `vm.c` embeds one F instruction as data, so those builds
+  add F to `-march`. The build script checks that this embedded word is the
+  only FP instruction in each binary.
+- Difftest now gives Spike `mmu-type = "riscv,sv39"` and `_svadu`.
