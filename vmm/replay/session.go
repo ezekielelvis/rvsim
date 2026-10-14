@@ -12,6 +12,7 @@ import (
 
 	"github.com/ezekielelvis/rvsim/vmm/boot"
 	"github.com/ezekielelvis/rvsim/vmm/devices/virtio/blk"
+	"github.com/ezekielelvis/rvsim/vmm/fault"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
 	"github.com/ezekielelvis/rvsim/vmm/snapshot"
 	"github.com/ezekielelvis/rvsim/vmm/vm"
@@ -27,6 +28,11 @@ type Spec struct {
 	Bootargs                       string
 	RAMSize                        uint64 // bytes; 0 means the default
 	CheckpointEvery                uint64 // steps; 0 means DefaultCheckpointEvery
+	// Faults, if set, injects faults while recording (ADR-031); each one
+	// applied is recorded, and printed to FaultLog if set. Replays apply the
+	// recorded faults and print them to FaultLog.
+	Faults   *fault.Spec
+	FaultLog io.Writer
 	// KeepDisk, if set, receives the disk image as the session left it.
 	// Otherwise the session's writes are discarded: both recording and replay
 	// run on a private copy, so the original stays a pristine input.
@@ -52,6 +58,7 @@ type Session struct {
 
 	snapEvery uint64 // replay: save a snapshot every snapEvery steps
 	snapDir   string
+	faults    []fault.Applied // replay: the recorded faults
 }
 
 // Divergence reports a replay whose state differs from the recording.
@@ -184,7 +191,7 @@ func StartRecording(spec Spec, out string, console io.Writer, input <-chan byte)
 	}
 	h := &Header{
 		ABIVersion: machine.ABIVersion, CoreBuild: machine.CoreBuild(), Machine: cfg,
-		Bootargs: spec.Bootargs, Input: input != nil, CheckpointEvery: every, Hash: "xxh3-64",
+		Bootargs: spec.Bootargs, Input: input != nil, CheckpointEvery: every, Hash: "xxh3-64", Faults: spec.Faults,
 	}
 	s := &Session{Header: h, keepDisk: spec.KeepDisk}
 	vcfg := vm.Config{Machine: cfg, Console: console, Input: input, CheckpointEvery: every}
@@ -198,6 +205,14 @@ func StartRecording(spec Spec, out string, console io.Writer, input <-chan byte)
 			return err
 		}
 		return s.w.Checkpoint(step, s.VM.Instret(), hs)
+	}
+	if spec.Faults != nil {
+		vcfg.Faults = fault.NewLive(spec.Faults, func(a fault.Applied) error {
+			if spec.FaultLog != nil {
+				fmt.Fprintln(spec.FaultLog, a)
+			}
+			return s.w.Fault(a)
+		})
 	}
 	if err := s.start(vcfg, l, func() error {
 		var err error
@@ -371,9 +386,12 @@ func openRecording(path string, spec Spec, console io.Writer) (*Session, vm.Conf
 		s.Warnings = append(s.Warnings, "the recording is truncated; replaying up to its last complete record")
 	}
 	script := &vm.InputScript{Open: h.Input}
+	var faults []fault.Applied
 	for i := range recs {
 		r := &recs[i]
 		switch r.Tag {
+		case TagFault:
+			faults = append(faults, *r.Fault)
 		case TagInput:
 			script.Events = append(script.Events, vm.InputEvent{Step: r.Step, Data: r.Data})
 		case TagInputEOF:
@@ -386,6 +404,15 @@ func openRecording(path string, spec Spec, console io.Writer) (*Session, vm.Conf
 	}
 	vcfg := vm.Config{Machine: h.Machine, Console: console, Replay: script, CheckpointEvery: h.CheckpointEvery,
 		Checkpoint: s.verify}
+	s.faults = faults
+	if len(faults) > 0 {
+		vcfg.Faults = fault.NewReplay(faults, func(a fault.Applied) error {
+			if spec.FaultLog != nil {
+				fmt.Fprintln(spec.FaultLog, a)
+			}
+			return nil
+		})
+	}
 	return s, vcfg, nil
 }
 
@@ -476,6 +503,16 @@ func JumpTo(path string, spec Spec, snapDir string, step uint64, console io.Writ
 			}
 			diskPath = f.Name()
 			f.Close()
+		}
+		if vcfg.Faults != nil {
+			// Faults before the snapshot are already in its state.
+			var later []fault.Applied
+			for _, a := range s.faults {
+				if a.Step > best || (a.Step == best && a.Event != fault.EvBoundary) {
+					later = append(later, a)
+				}
+			}
+			vcfg.Faults = fault.NewReplay(later, nil)
 		}
 		v, disk, err := snap.Restore(vcfg, diskPath)
 		if err != nil {

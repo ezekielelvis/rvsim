@@ -3,6 +3,7 @@ package replay
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ezekielelvis/rvsim/vmm/fault"
 	. "github.com/ezekielelvis/rvsim/vmm/internal/rvasm"
 )
 
@@ -324,5 +326,59 @@ func TestJumpToStepRestoresTheNearestSnapshot(t *testing.T) {
 			t.Errorf("continuing after jump to %d: %v", step, err)
 		}
 		j.Close()
+	}
+}
+
+func TestFaultyRunReplaysExactly(t *testing.T) {
+	spec := testSpec(t)
+	f, err := fault.Parse([]byte(fmt.Sprintf(`
+seed: 7
+faults:
+  - name: noisy-line
+    when: {chance: {p: 0.3}}
+    do: {uart: {dir: rx, garble: true}}
+    times: 0
+  - name: cosmic-ray
+    when: {step: 30000}
+    do: {flip_bit: {addr: %#x, bit: 1}}
+  - name: bad-register
+    when: {pc: {addr: %#x, hit: 3}}
+    do: {reg: {reg: a0, xor: 1}}
+  - name: flaky-status
+    when: {access: {device: uart, kind: read, nth: 40}}
+    do: {mmio_read: {random: true}}
+`, 0x8001_0004, 0x8000_0000+7*4)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	spec.Faults, spec.FaultLog = f, &log
+	path := filepath.Join(t.TempDir(), "faulty.rvrec")
+	const text = "faults are reproducible\nq"
+	console := record(t, spec, path, text)
+	recorded := log.String()
+	t.Logf("faults:\n%s", recorded)
+	if !strings.Contains(recorded, "noisy-line") || !strings.Contains(recorded, "cosmic-ray") ||
+		!strings.Contains(recorded, "bad-register") || !strings.Contains(recorded, "flaky-status") {
+		t.Fatalf("faults applied while recording:\n%s", recorded)
+	}
+	if console == text {
+		t.Fatal("no fault reached the console")
+	}
+
+	for i := range 3 {
+		var out, replayLog bytes.Buffer
+		s, err := StartReplay(path, Spec{FaultLog: &replayLog}, &out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = s.Replay()
+		s.Close()
+		if err != nil {
+			t.Fatalf("replay %d: %v", i, err)
+		}
+		if out.String() != console || replayLog.String() != recorded {
+			t.Fatalf("replay %d differs:\nconsole %q vs %q\nfaults:\n%s\nvs recorded:\n%s", i, out.String(), console, replayLog.String(), recorded)
+		}
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/ezekielelvis/rvsim/vmm/fault"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
 	"github.com/ezekielelvis/rvsim/vmm/vm"
 )
@@ -37,7 +38,9 @@ const (
 	TagInputEOF   = 0x02
 	TagCheckpoint = 0x03
 	TagEnd        = 0x04
-	// 0x10-0x1f are reserved for fault injection (Phase 11).
+	// TagFault is an injected fault (JSON fault.Applied); 0x11-0x1f are
+	// reserved for later fault records.
+	TagFault = 0x10
 )
 
 // Image identifies one input image by content.
@@ -65,6 +68,7 @@ type Header struct {
 	Input           bool           `json:"input"` // host input was attached
 	CheckpointEvery uint64         `json:"checkpoint_every"`
 	Hash            string         `json:"hash"`
+	Faults          *fault.Spec    `json:"faults,omitempty"` // the plan, for reference; replay uses the fault records
 	Images          []Image        `json:"images"`
 }
 
@@ -98,6 +102,8 @@ type Record struct {
 	// End.
 	Reason string
 	Code   uint64
+	// Fault.
+	Fault *fault.Applied
 }
 
 // Writer appends records to a recording file. It implements vm.Recorder.
@@ -161,6 +167,15 @@ func hashPayload(instret uint64, h vm.Hashes) []byte {
 	binary.LittleEndian.PutUint64(p[16:], h.RAM)
 	binary.LittleEndian.PutUint64(p[24:], h.VMM)
 	return p
+}
+
+// Fault records an injected fault.
+func (w *Writer) Fault(a fault.Applied) error {
+	p, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	return w.record(TagFault, a.Step, p)
 }
 
 // Checkpoint records the state hashes at step.
@@ -255,6 +270,14 @@ func readRecord(br *bufio.Reader, tag uint8, step *uint64) (Record, error) {
 	case TagInput:
 		rec.Data = p
 	case TagInputEOF:
+	case TagFault:
+		rec.Fault = new(fault.Applied)
+		if err := json.Unmarshal(p, rec.Fault); err != nil {
+			return Record{}, fmt.Errorf("replay: fault record at step %d: %w", *step, err)
+		}
+		if rec.Fault.Step != *step {
+			return Record{}, fmt.Errorf("replay: fault record at step %d claims step %d", *step, rec.Fault.Step)
+		}
 	case TagCheckpoint, TagEnd:
 		if len(p) < 32 || (tag == TagEnd && len(p) < 40) {
 			return Record{}, fmt.Errorf("replay: short record (tag %#x) at step %d", tag, *step)
