@@ -16,6 +16,7 @@ import (
 	"github.com/ezekielelvis/rvsim/vmm/devices/uart"
 	"github.com/ezekielelvis/rvsim/vmm/devices/virtio"
 	"github.com/ezekielelvis/rvsim/vmm/devices/virtio/blk"
+	"github.com/ezekielelvis/rvsim/vmm/fault"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
 	"github.com/ezekielelvis/rvsim/vmm/sched"
 	"github.com/ezekielelvis/rvsim/vmm/trace"
@@ -60,6 +61,8 @@ type Config struct {
 	Record Recorder
 	// Replay, if set, supplies recorded input; Input must then be nil.
 	Replay *InputScript
+	// Faults, if set, injects faults (ADR-031).
+	Faults *fault.Injector
 	// Checkpoint, if set, is called at every multiple of CheckpointEvery
 	// steps, at a run-loop boundary; an error stops Run.
 	CheckpointEvery uint64
@@ -87,6 +90,7 @@ var ErrIdleForever = errors.New("vm: hart is idle and nothing can wake it")
 const (
 	evInputByte = iota // deliver the next queued input byte
 	evInject           // queue an injected chunk (arg = index)
+	evIRQRaise         // assert a delayed interrupt (fault injection)
 )
 
 // VM is a machine with its devices, scheduler and run loop.
@@ -120,6 +124,10 @@ type VM struct {
 	deliveredAt  uint64
 	scriptPos    int    // next InputScript event to deliver
 	nextCkpt     uint64 // step of the next checkpoint
+
+	irqLines map[uint32]*irqLine // fault layer on PLIC sources
+	faultBPs map[uint32]bool     // core breakpoints that are fault pc triggers
+	faultErr error               // from a device-side fault hook
 }
 
 // New creates a VM.
@@ -142,7 +150,7 @@ func New(cfg Config) (*VM, error) {
 		// rv_set_irq_lines only fails on invalid bits, which the PLIC never sets.
 		_ = m.SetIRQLines(lines)
 	})
-	v.uart = uart.New(cfg.Console, v.plic.Line(UARTIRQ))
+	v.uart = uart.New(cfg.Console, v.line(UARTIRQ))
 	for _, d := range []struct {
 		name       string
 		base, size uint64
@@ -158,7 +166,11 @@ func New(cfg Config) (*VM, error) {
 		}
 	}
 	if cfg.Disk != nil {
-		d, err := blk.New(*cfg.Disk, m, v.plic.Line(VirtioIRQ), &v.sched, v.Now)
+		dc := *cfg.Disk
+		if cfg.Faults != nil {
+			dc.Fault = v.blkFault
+		}
+		d, err := blk.New(dc, m, v.line(VirtioIRQ), &v.sched, v.Now)
 		if err == nil {
 			err = v.bus.Map("virtio-blk", VirtioBase, virtio.Size, d)
 		}
@@ -168,6 +180,10 @@ func New(cfg Config) (*VM, error) {
 		}
 	}
 	v.self = v.sched.Register("vm", v)
+	if err := v.installFaults(); err != nil {
+		m.Close()
+		return nil, err
+	}
 	if cfg.Trace != nil {
 		if err := v.EnableTrace(cfg.Trace); err != nil {
 			m.Close()
@@ -218,6 +234,8 @@ func (v *VM) HandleEvent(kind uint32, arg uint64) {
 	case evInject:
 		v.queueInput(v.injected[arg])
 		v.injected[arg] = nil
+	case evIRQRaise:
+		v.raiseDelayed(arg)
 	case evInputByte:
 		v.inputBusy = false
 		if len(v.input) == 0 {
@@ -226,7 +244,9 @@ func (v *VM) HandleEvent(kind uint32, arg uint64) {
 		// Hold input back while the guest's FIFO is full (flow control),
 		// rather than losing it to an overrun.
 		if v.uart.RxSpace() > 0 {
-			v.uart.Receive(v.input[0])
+			if b, keep := v.uartFault(fault.EvUARTRx, v.input[0]); keep {
+				v.uart.Receive(b)
+			}
 			v.input = v.input[1:]
 		}
 		if len(v.input) > 0 {
@@ -376,7 +396,7 @@ func (v *VM) deadline(limit uint64) uint64 {
 	if r := v.cfg.Replay; r != nil && v.scriptPos < len(r.Events) {
 		d = min(d, max(r.Events[v.scriptPos].Step, v.now))
 	}
-	return d
+	return min(d, v.faultDeadline())
 }
 
 // checkpoint calls Config.Checkpoint when the run loop reaches its step.
@@ -406,6 +426,9 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 		if err := v.checkpoint(); err != nil {
 			return v.result(false, 0), err
 		}
+		if err := v.boundaryFaults(); err != nil {
+			return v.result(false, 0), err
+		}
 		if err := v.pollInput(); err != nil {
 			return v.result(false, 0), err
 		}
@@ -413,10 +436,10 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 			return v.result(false, 0), nil
 		}
 		budget := min(uint64(maxBatch), v.deadline(limit)-v.now)
-		if v.mmioInFlight && v.inputOpen && v.cfg.Replay == nil {
-			// Retire just the completed MMIO instruction, so host input
-			// finds a clean boundary even in a guest that polls a device in
-			// a tight loop (ADR-028).
+		if v.mmioInFlight && ((v.inputOpen && v.cfg.Replay == nil) || v.cfg.Faults != nil) {
+			// Retire just the completed MMIO instruction, so host input and
+			// due faults find a clean boundary even in a guest that polls a
+			// device in a tight loop (ADR-028, ADR-031).
 			budget = 1
 		}
 		if next, ok := v.sched.Next(); ok {
@@ -431,6 +454,9 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 		}
 		v.mmioInFlight = false // the completed access, if any, has retired
 		v.now, v.instret = exit.Steps, exit.Instret
+		if err := v.faultErr; err != nil {
+			return v.result(false, 0), err
+		}
 		if err := v.drainTrace(); err != nil {
 			return v.result(false, 0), err
 		}
@@ -442,6 +468,7 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 			if ok {
 				val = d.Read(off, int(exit.Size))
 			}
+			v.mmioFault(exit.Addr, int(exit.Size), false, &val)
 			if err := v.m.CompleteMMIO(val, !ok); err != nil {
 				return v.result(false, 0), err
 			}
@@ -451,6 +478,7 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 			if ok {
 				d.Write(off, int(exit.Size), exit.Value)
 			}
+			v.mmioFault(exit.Addr, int(exit.Size), true, nil)
 			if err := v.m.CompleteMMIO(0, !ok); err != nil {
 				return v.result(false, 0), err
 			}
@@ -459,6 +487,9 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 				return v.finishRun(*f)
 			}
 		case machine.ExitBreakpoint:
+			if v.faultBPs[uint32(exit.Value)] {
+				continue // a fault pc trigger: the next boundary handles it
+			}
 			if err := v.flushTrace(); err != nil {
 				return v.result(false, 0), err
 			}
