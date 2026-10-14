@@ -131,6 +131,15 @@ func Run(img *loader.Image, opt Options) (Result, error) {
 			}
 			res.ExitCode = code
 			return res, nil
+		case machine.ExitWFI:
+			// Idle until the CLINT timer fires, the only wake source a bare
+			// program has here. (The Phase 4 scheduler generalizes this.)
+			if exit.TimerStep == ^uint64(0) || exit.TimerStep <= exit.Steps || exit.TimerStep > maxSteps {
+				return res, fmt.Errorf("baremetal: WFI at pc %#x with no interrupt that can wake the hart", exit.PC)
+			}
+			if err := m.AdvanceIdle(exit.TimerStep - exit.Steps); err != nil {
+				return res, err
+			}
 		case machine.ExitBudget, machine.ExitTraceFull:
 			if exit.Steps >= maxSteps {
 				if tw != nil {
