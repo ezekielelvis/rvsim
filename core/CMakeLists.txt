@@ -26,6 +26,7 @@ endif()
 # exceptions or RTTI so nothing can unwind across the C ABI.
 add_library(rvcore STATIC
   src/abi.cpp
+  src/clint/clint.cpp
   src/cpu/execute.cpp
   src/csr/csr.cpp
   src/decode/decode.cpp
@@ -35,6 +36,14 @@ target_include_directories(rvcore
   PRIVATE src
 )
 target_compile_options(rvcore PRIVATE ${RVSIM_WARNINGS} -fno-exceptions -fno-rtti)
+
+# Tell Go when the library changes (see cmake/write_corehash.cmake).
+add_custom_command(TARGET rvcore POST_BUILD
+  COMMAND ${CMAKE_COMMAND}
+    -DLIB=$<TARGET_FILE:rvcore>
+    -DOUT=${CMAKE_CURRENT_SOURCE_DIR}/../vmm/machine/zz_corehash.go
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/write_corehash.cmake
+  VERBATIM)
 
 if(RVSIM_BUILD_TESTS)
   include(FetchContent)
@@ -52,12 +61,14 @@ if(RVSIM_BUILD_TESTS)
     tests/abi_test.cpp
     tests/alu_test.cpp
     tests/atomic_test.cpp
+    tests/clint_test.cpp
     tests/compressed_test.cpp
     tests/control_test.cpp
     tests/decode_test.cpp
     tests/header_c_test.c
     tests/memory_test.cpp
     tests/muldiv_test.cpp
+    tests/privileged_test.cpp
     tests/system_test.cpp
   )
   target_include_directories(rvcore_tests PRIVATE src)

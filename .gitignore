@@ -3,3 +3,4 @@
 *.dtb
 /tests/images/out/
 .DS_Store
+/vmm/machine/zz_corehash.go

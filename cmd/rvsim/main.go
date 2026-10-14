@@ -31,7 +31,11 @@ func main() {
 	case "run":
 		os.Exit(runCmd(os.Args[2:]))
 	case "version":
-		fmt.Printf("rvsim (core ABI v%d)\n", machine.ABIVersion)
+		build := machine.CoreBuild()
+		if len(build) > 12 {
+			build = build[:12]
+		}
+		fmt.Printf("rvsim (core ABI v%d, core build %s)\n", machine.ABIVersion, build)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
