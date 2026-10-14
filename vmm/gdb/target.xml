@@ -1,0 +1,78 @@
+<?xml version="1.0"?>
+<!DOCTYPE target SYSTEM "gdb-target.dtd">
+<target version="1.0">
+  <architecture>riscv:rv64</architecture>
+  <feature name="org.gnu.gdb.riscv.cpu">
+    <reg name="zero" bitsize="64" type="int" regnum="0"/>
+    <reg name="ra" bitsize="64" type="code_ptr" regnum="1"/>
+    <reg name="sp" bitsize="64" type="data_ptr" regnum="2"/>
+    <reg name="gp" bitsize="64" type="data_ptr" regnum="3"/>
+    <reg name="tp" bitsize="64" type="data_ptr" regnum="4"/>
+    <reg name="t0" bitsize="64" type="int" regnum="5"/>
+    <reg name="t1" bitsize="64" type="int" regnum="6"/>
+    <reg name="t2" bitsize="64" type="int" regnum="7"/>
+    <reg name="fp" bitsize="64" type="data_ptr" regnum="8"/>
+    <reg name="s1" bitsize="64" type="int" regnum="9"/>
+    <reg name="a0" bitsize="64" type="int" regnum="10"/>
+    <reg name="a1" bitsize="64" type="int" regnum="11"/>
+    <reg name="a2" bitsize="64" type="int" regnum="12"/>
+    <reg name="a3" bitsize="64" type="int" regnum="13"/>
+    <reg name="a4" bitsize="64" type="int" regnum="14"/>
+    <reg name="a5" bitsize="64" type="int" regnum="15"/>
+    <reg name="a6" bitsize="64" type="int" regnum="16"/>
+    <reg name="a7" bitsize="64" type="int" regnum="17"/>
+    <reg name="s2" bitsize="64" type="int" regnum="18"/>
+    <reg name="s3" bitsize="64" type="int" regnum="19"/>
+    <reg name="s4" bitsize="64" type="int" regnum="20"/>
+    <reg name="s5" bitsize="64" type="int" regnum="21"/>
+    <reg name="s6" bitsize="64" type="int" regnum="22"/>
+    <reg name="s7" bitsize="64" type="int" regnum="23"/>
+    <reg name="s8" bitsize="64" type="int" regnum="24"/>
+    <reg name="s9" bitsize="64" type="int" regnum="25"/>
+    <reg name="s10" bitsize="64" type="int" regnum="26"/>
+    <reg name="s11" bitsize="64" type="int" regnum="27"/>
+    <reg name="t3" bitsize="64" type="int" regnum="28"/>
+    <reg name="t4" bitsize="64" type="int" regnum="29"/>
+    <reg name="t5" bitsize="64" type="int" regnum="30"/>
+    <reg name="t6" bitsize="64" type="int" regnum="31"/>
+    <reg name="pc" bitsize="64" type="code_ptr" regnum="32"/>
+  </feature>
+  <feature name="org.gnu.gdb.riscv.csr">
+    <reg name="sstatus" bitsize="64" type="int" regnum="321" group="csr"/>
+    <reg name="sie" bitsize="64" type="int" regnum="325" group="csr"/>
+    <reg name="stvec" bitsize="64" type="int" regnum="326" group="csr"/>
+    <reg name="scounteren" bitsize="64" type="int" regnum="327" group="csr"/>
+    <reg name="senvcfg" bitsize="64" type="int" regnum="331" group="csr"/>
+    <reg name="sscratch" bitsize="64" type="int" regnum="385" group="csr"/>
+    <reg name="sepc" bitsize="64" type="int" regnum="386" group="csr"/>
+    <reg name="scause" bitsize="64" type="int" regnum="387" group="csr"/>
+    <reg name="stval" bitsize="64" type="int" regnum="388" group="csr"/>
+    <reg name="sip" bitsize="64" type="int" regnum="389" group="csr"/>
+    <reg name="satp" bitsize="64" type="int" regnum="449" group="csr"/>
+    <reg name="mstatus" bitsize="64" type="int" regnum="833" group="csr"/>
+    <reg name="misa" bitsize="64" type="int" regnum="834" group="csr"/>
+    <reg name="medeleg" bitsize="64" type="int" regnum="835" group="csr"/>
+    <reg name="mideleg" bitsize="64" type="int" regnum="836" group="csr"/>
+    <reg name="mie" bitsize="64" type="int" regnum="837" group="csr"/>
+    <reg name="mtvec" bitsize="64" type="int" regnum="838" group="csr"/>
+    <reg name="mcounteren" bitsize="64" type="int" regnum="839" group="csr"/>
+    <reg name="menvcfg" bitsize="64" type="int" regnum="843" group="csr"/>
+    <reg name="mscratch" bitsize="64" type="int" regnum="897" group="csr"/>
+    <reg name="mepc" bitsize="64" type="int" regnum="898" group="csr"/>
+    <reg name="mcause" bitsize="64" type="int" regnum="899" group="csr"/>
+    <reg name="mtval" bitsize="64" type="int" regnum="900" group="csr"/>
+    <reg name="mip" bitsize="64" type="int" regnum="901" group="csr"/>
+    <reg name="mcycle" bitsize="64" type="int" regnum="2881" group="csr"/>
+    <reg name="minstret" bitsize="64" type="int" regnum="2883" group="csr"/>
+    <reg name="cycle" bitsize="64" type="int" regnum="3137" group="csr"/>
+    <reg name="time" bitsize="64" type="int" regnum="3138" group="csr"/>
+    <reg name="instret" bitsize="64" type="int" regnum="3139" group="csr"/>
+    <reg name="mvendorid" bitsize="64" type="int" regnum="3922" group="csr"/>
+    <reg name="marchid" bitsize="64" type="int" regnum="3923" group="csr"/>
+    <reg name="mimpid" bitsize="64" type="int" regnum="3924" group="csr"/>
+    <reg name="mhartid" bitsize="64" type="int" regnum="3925" group="csr"/>
+  </feature>
+  <feature name="org.gnu.gdb.riscv.virtual">
+    <reg name="priv" bitsize="64" type="int" regnum="4161"/>
+  </feature>
+</target>
