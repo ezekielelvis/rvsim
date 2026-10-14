@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"testing"
+
+	"github.com/zeebo/xxh3"
 )
 
 func newTestMachine(t testing.TB) *Machine {
@@ -225,5 +227,38 @@ func BenchmarkRunExit(b *testing.B) {
 		if _, err := m.Run(1); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// The core's RAM hash is plain XXH3-64 of the RAM bytes: the pure-Go
+// implementation the VMM uses must agree with the vendored C one.
+func TestStateHashAgreesWithGoXXH3(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.RAMSize = 1 << 20
+	m, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.WritePhys(cfg.RAMBase+123, []byte("rvsim")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.StateHash(HashRAM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := xxh3.Hash(m.RAM()); got != want {
+		t.Fatalf("core RAM hash %#x, Go XXH3 %#x", got, want)
+	}
+	core, _ := m.StateHash(HashCore)
+	both, _ := m.StateHash(HashCore | HashRAM)
+	var pair [16]byte
+	binary.LittleEndian.PutUint64(pair[0:], core)
+	binary.LittleEndian.PutUint64(pair[8:], got)
+	if want := xxh3.Hash(pair[:]); both != want {
+		t.Fatalf("combined hash %#x, want XXH3(core, ram) %#x", both, want)
+	}
+	if _, err := m.StateHash(0); err == nil {
+		t.Fatal("StateHash(0) succeeded")
 	}
 }

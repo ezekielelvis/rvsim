@@ -357,6 +357,26 @@ func (m *Machine) WritePhys(paddr uint64, buf []byte) error {
 	return check("write_phys", C.rv_write_phys(m.p, C.uint64_t(paddr), unsafe.Pointer(&buf[0]), C.size_t(len(buf))))
 }
 
+// What rv_state_hash covers.
+const (
+	HashCore = uint32(C.RV_HASH_CORE)
+	HashRAM  = uint32(C.RV_HASH_RAM)
+)
+
+// StateHash returns the XXH3-64 state hash of the core, of RAM, or of both
+// (HashCore|HashRAM), computed over a canonical serialization that is the
+// same on every host.
+func (m *Machine) StateHash(what uint32) (uint64, error) {
+	if m.p == nil {
+		return 0, ErrClosed
+	}
+	var h C.uint64_t
+	if err := check("state_hash", C.rv_state_hash(m.p, C.uint32_t(what), &h)); err != nil {
+		return 0, err
+	}
+	return uint64(h), nil
+}
+
 // RAM returns a view of guest RAM backed by C memory. It is valid until Close,
 // its contents are stable only between Run calls, and it must never be
 // written: use WritePhys so the core can invalidate its caches.
