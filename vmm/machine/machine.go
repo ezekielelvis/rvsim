@@ -357,6 +357,35 @@ func (m *Machine) WritePhys(paddr uint64, buf []byte) error {
 	return check("write_phys", C.rv_write_phys(m.p, C.uint64_t(paddr), unsafe.Pointer(&buf[0]), C.size_t(len(buf))))
 }
 
+// SnapshotCore returns the core's state (registers, CSRs, CLINT, TLB,
+// counters, pending MMIO), excluding RAM, as a versioned, checksummed blob.
+func (m *Machine) SnapshotCore() ([]byte, error) {
+	if m.p == nil {
+		return nil, ErrClosed
+	}
+	var n C.size_t
+	if err := check("core_snapshot_size", C.rv_core_snapshot_size(m.p, &n)); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, int(n))
+	if err := check("core_snapshot_save", C.rv_core_snapshot_save(m.p, unsafe.Pointer(&buf[0]), n)); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// RestoreCore loads a SnapshotCore blob taken on an identically configured
+// machine. RAM is restored separately (WritePhys).
+func (m *Machine) RestoreCore(snap []byte) error {
+	if m.p == nil {
+		return ErrClosed
+	}
+	if len(snap) == 0 {
+		return check("core_snapshot_load", C.RV_E_SNAP_BAD)
+	}
+	return check("core_snapshot_load", C.rv_core_snapshot_load(m.p, unsafe.Pointer(&snap[0]), C.size_t(len(snap))))
+}
+
 // What rv_state_hash covers.
 const (
 	HashCore = uint32(C.RV_HASH_CORE)

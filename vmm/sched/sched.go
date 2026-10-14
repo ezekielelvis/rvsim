@@ -81,6 +81,52 @@ func (s *Scheduler) Name(t Target) string { return s.names[t] }
 // Seq returns the sequence number the next scheduled event will get.
 func (s *Scheduler) Seq() uint64 { return s.seq }
 
+// Restore replaces the pending events and sequence counter, for example
+// from a snapshot. Events name their target by registered name, so a
+// restored machine may register its targets in any order.
+func (s *Scheduler) Restore(events []NamedEvent, seq uint64) error {
+	heap := make([]Event, 0, len(events))
+	for _, e := range events {
+		t := -1
+		for i, n := range s.names {
+			if n == e.Target {
+				t = i
+			}
+		}
+		if t < 0 {
+			return fmt.Errorf("sched: restore: unknown target %q", e.Target)
+		}
+		if e.Seq >= seq {
+			return fmt.Errorf("sched: restore: event sequence %d >= counter %d", e.Seq, seq)
+		}
+		heap = append(heap, Event{At: e.At, Seq: e.Seq, Target: Target(t), Kind: e.Kind, Arg: e.Arg})
+	}
+	s.heap, s.seq = heap[:0], seq
+	for _, e := range heap {
+		s.heap = append(s.heap, e)
+		s.up(len(s.heap) - 1)
+	}
+	return nil
+}
+
+// NamedEvent is an Event whose target is identified by name.
+type NamedEvent struct {
+	At     uint64
+	Seq    uint64
+	Target string
+	Kind   uint32
+	Arg    uint64
+}
+
+// Named returns the pending events, in firing order, with target names.
+func (s *Scheduler) Named() []NamedEvent {
+	var out []NamedEvent
+	for _, e := range s.Pending() {
+		out = append(out, NamedEvent{At: e.At, Seq: e.Seq, Target: s.names[e.Target], Kind: e.Kind, Arg: e.Arg})
+	}
+	return out
+}
+
 // Len returns the number of pending events.
 func (s *Scheduler) Len() int { return len(s.heap) }
 
