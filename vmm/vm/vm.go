@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/ezekielelvis/rvsim/vmm/devices"
 	"github.com/ezekielelvis/rvsim/vmm/devices/finisher"
@@ -273,6 +274,42 @@ poll:
 	return v.hostInput(buf, eof)
 }
 
+// IdleStepsPerSecond is the pace of idle time while live host input is
+// attached: the nominal rate of the 10 MHz timebase (boot.TimebaseFrequency
+// times the default steps per tick).
+const IdleStepsPerSecond = 100_000_000
+
+// paceIdle waits on the host clock for up to n idle steps' worth of time,
+// or until host input arrives, and returns how many steps to advance. A byte
+// that arrives is held for the next poll.
+//
+// Without it an idle interactive guest, whose next timer may be far off,
+// would leap through billions of steps while the user types. The wall clock
+// only decides when live input arrives, which a recording captures; replays
+// and runs without live input never consult it (ADR-028).
+func (v *VM) paceIdle(n uint64) uint64 {
+	const maxWait = time.Hour
+	wait := maxWait
+	if n < uint64(maxWait.Seconds())*IdleStepsPerSecond {
+		wait = time.Duration(n) * (time.Second / IdleStepsPerSecond)
+	}
+	start := time.Now()
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case b, ok := <-v.cfg.Input:
+		if ok {
+			v.held = append(v.held, b)
+		} else {
+			v.heldEOF = true
+		}
+		elapsed := uint64(time.Since(start) / (time.Second / IdleStepsPerSecond))
+		return min(elapsed, n)
+	case <-t.C:
+		return n
+	}
+}
+
 // waitInput blocks until host input arrives or ends, and holds it for the
 // next poll: input is delivered only at run-loop boundaries.
 func (v *VM) waitInput() error {
@@ -464,6 +501,9 @@ func (v *VM) idle(exit machine.Exit, limit uint64) error {
 		}
 	}
 	n := min(target, v.deadline(limit)) - v.now
+	if v.cfg.Input != nil && v.inputOpen && n > 0 {
+		n = v.paceIdle(n)
+	}
 	if err := v.m.AdvanceIdle(n); err != nil {
 		return err
 	}
