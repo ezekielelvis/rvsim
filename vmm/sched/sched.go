@@ -1,0 +1,121 @@
+// Package sched is the VMM's discrete-event scheduler. Time is virtual: it
+// is measured in the core's steps (ADR-001), never in wall-clock time.
+//
+// Events name a registered target, a kind and an argument rather than
+// holding a closure, so the set of pending events is plain data that a
+// snapshot can save and restore.
+package sched
+
+import "fmt"
+
+// Handler receives the events scheduled for it.
+type Handler interface {
+	HandleEvent(kind uint32, arg uint64)
+}
+
+// Target identifies a registered Handler.
+type Target uint16
+
+// Event is a pending event.
+type Event struct {
+	At     uint64 // step at which the event fires
+	Seq    uint64 // tie-breaker: events at the same step fire in scheduling order
+	Target Target
+	Kind   uint32
+	Arg    uint64
+}
+
+// Scheduler is a deterministic event queue. It is not safe for concurrent
+// use: like the machine, it belongs to the run-loop goroutine.
+type Scheduler struct {
+	heap     []Event
+	seq      uint64
+	handlers []Handler
+	names    []string
+}
+
+// Register adds a handler under a stable name and returns its Target.
+func (s *Scheduler) Register(name string, h Handler) Target {
+	for _, n := range s.names {
+		if n == name {
+			panic(fmt.Sprintf("sched: target %q registered twice", name))
+		}
+	}
+	s.handlers = append(s.handlers, h)
+	s.names = append(s.names, name)
+	return Target(len(s.handlers) - 1)
+}
+
+// Schedule queues an event to fire when virtual time reaches at.
+func (s *Scheduler) Schedule(at uint64, t Target, kind uint32, arg uint64) {
+	if int(t) >= len(s.handlers) {
+		panic(fmt.Sprintf("sched: unknown target %d", t))
+	}
+	s.heap = append(s.heap, Event{At: at, Seq: s.seq, Target: t, Kind: kind, Arg: arg})
+	s.seq++
+	s.up(len(s.heap) - 1)
+}
+
+// Next returns the time of the earliest pending event.
+func (s *Scheduler) Next() (uint64, bool) {
+	if len(s.heap) == 0 {
+		return 0, false
+	}
+	return s.heap[0].At, true
+}
+
+// Len returns the number of pending events.
+func (s *Scheduler) Len() int { return len(s.heap) }
+
+// RunDue fires, in (At, Seq) order, every event due at or before now,
+// including events that handlers schedule for times <= now while it runs.
+// It returns the number of events fired.
+func (s *Scheduler) RunDue(now uint64) int {
+	n := 0
+	for len(s.heap) > 0 && s.heap[0].At <= now {
+		e := s.pop()
+		s.handlers[e.Target].HandleEvent(e.Kind, e.Arg)
+		n++
+	}
+	return n
+}
+
+func less(a, b *Event) bool {
+	if a.At != b.At {
+		return a.At < b.At
+	}
+	return a.Seq < b.Seq
+}
+
+func (s *Scheduler) up(i int) {
+	for i > 0 {
+		p := (i - 1) / 2
+		if !less(&s.heap[i], &s.heap[p]) {
+			return
+		}
+		s.heap[i], s.heap[p] = s.heap[p], s.heap[i]
+		i = p
+	}
+}
+
+func (s *Scheduler) pop() Event {
+	top := s.heap[0]
+	last := len(s.heap) - 1
+	s.heap[0] = s.heap[last]
+	s.heap = s.heap[:last]
+	for i := 0; ; {
+		l, r, m := 2*i+1, 2*i+2, i
+		if l < len(s.heap) && less(&s.heap[l], &s.heap[m]) {
+			m = l
+		}
+		if r < len(s.heap) && less(&s.heap[r], &s.heap[m]) {
+			m = r
+		}
+		if m == i {
+			break
+		}
+		s.heap[i], s.heap[m] = s.heap[m], s.heap[i]
+		i = m
+	}
+	return top
+}
