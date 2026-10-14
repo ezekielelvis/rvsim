@@ -54,6 +54,15 @@ type Config struct {
 	Trace io.Writer
 	// Disk, if set, adds a virtio block device backed by Disk.Disk.
 	Disk *blk.Config
+
+	// Record, if set, receives every external input as it enters the VM.
+	Record Recorder
+	// Replay, if set, supplies recorded input; Input must then be nil.
+	Replay *InputScript
+	// Checkpoint, if set, is called at every multiple of CheckpointEvery
+	// steps, at a run-loop boundary; an error stops Run.
+	CheckpointEvery uint64
+	Checkpoint      func(step uint64) error
 }
 
 // Result describes why Run returned.
@@ -94,6 +103,18 @@ type VM struct {
 	inputBusy bool     // an evInputByte event is scheduled
 	injected  [][]byte // chunks queued by ScheduleInput, by index
 	inputOpen bool
+
+	// An MMIO access was completed but its instruction has not retired yet:
+	// the next rv_run retires it. Host input is accepted only when this is
+	// false, at instruction boundaries replay can reproduce (ADR-028).
+	mmioInFlight bool
+	pollBuf      []byte
+	held         []byte // live: host bytes taken while idle, delivered at the next poll
+	heldEOF      bool
+	delivered    bool // live: input was delivered at step deliveredAt
+	deliveredAt  uint64
+	scriptPos    int    // next InputScript event to deliver
+	nextCkpt     uint64 // step of the next checkpoint
 }
 
 // New creates a VM.
@@ -102,7 +123,16 @@ func New(cfg Config) (*VM, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := &VM{cfg: cfg, m: m, inputOpen: cfg.Input != nil}
+	if cfg.Replay != nil && cfg.Input != nil {
+		m.Close()
+		return nil, errors.New("vm: Replay and Input are mutually exclusive")
+	}
+	if (cfg.CheckpointEvery == 0) != (cfg.Checkpoint == nil) {
+		m.Close()
+		return nil, errors.New("vm: CheckpointEvery and Checkpoint go together")
+	}
+	v := &VM{cfg: cfg, m: m, inputOpen: cfg.Input != nil || (cfg.Replay != nil && cfg.Replay.Open)}
+	v.nextCkpt = cfg.CheckpointEvery
 	v.plic = plic.New(func(lines uint64) {
 		// rv_set_irq_lines only fails on invalid bits, which the PLIC never sets.
 		_ = m.SetIRQLines(lines)
@@ -134,13 +164,22 @@ func New(cfg Config) (*VM, error) {
 	}
 	v.self = v.sched.Register("vm", v)
 	if cfg.Trace != nil {
-		if err := m.EnableTrace(1 << 20); err != nil {
+		if err := v.EnableTrace(cfg.Trace); err != nil {
 			m.Close()
 			return nil, err
 		}
-		v.trace = trace.NewSpikeWriter(cfg.Trace)
 	}
 	return v, nil
+}
+
+// EnableTrace starts writing a Spike --log-commits style commit log of every
+// instruction retired from now on to w. Tracing does not affect the guest.
+func (v *VM) EnableTrace(w io.Writer) error {
+	if err := v.m.EnableTrace(1 << 20); err != nil {
+		return err
+	}
+	v.trace = trace.NewSpikeWriter(w)
+	return nil
 }
 
 // HasDisk reports whether the VM has a virtio block device.
@@ -201,30 +240,115 @@ func (v *VM) queueInput(b []byte) {
 }
 
 // pollInput moves host input that has already arrived into the queue,
-// delivering it from the current virtual time. It never blocks.
-func (v *VM) pollInput() {
-	for v.inputOpen {
+// delivering it from the current virtual time. It never blocks. In replay
+// it delivers the recorded input due now instead.
+func (v *VM) pollInput() error {
+	if v.cfg.Replay != nil {
+		return v.pollScript()
+	}
+	// Host input enters at most once per step, at a run-loop boundary with
+	// no MMIO access in flight: points replay reproduces exactly (ADR-028).
+	if v.mmioInFlight || !v.inputOpen || (v.delivered && v.deliveredAt == v.now) {
+		return nil
+	}
+	buf, eof := append(v.pollBuf[:0], v.held...), v.heldEOF
+	v.held, v.heldEOF = v.held[:0], false
+poll:
+	for !eof {
 		select {
 		case b, ok := <-v.cfg.Input:
 			if !ok {
-				v.inputOpen = false
-				return
+				eof = true
+				break poll
 			}
-			v.queueInput([]byte{b})
+			buf = append(buf, b)
 		default:
-			return
+			break poll
 		}
 	}
+	v.pollBuf = buf
+	if len(buf) > 0 || eof {
+		v.delivered, v.deliveredAt = true, v.now
+	}
+	return v.hostInput(buf, eof)
 }
 
-// waitInput blocks until host input arrives or ends.
-func (v *VM) waitInput() {
-	b, ok := <-v.cfg.Input
-	if !ok {
-		v.inputOpen = false
-		return
+// waitInput blocks until host input arrives or ends, and holds it for the
+// next poll: input is delivered only at run-loop boundaries.
+func (v *VM) waitInput() error {
+	if len(v.held) > 0 || v.heldEOF {
+		return fmt.Errorf("vm: internal error: idle at step %d with host input held", v.now)
 	}
-	v.queueInput([]byte{b})
+	b, ok := <-v.cfg.Input
+	if ok {
+		v.held = append(v.held, b)
+	} else {
+		v.heldEOF = true
+	}
+	return nil
+}
+
+// hostInput records and queues host bytes and the end of input.
+func (v *VM) hostInput(data []byte, eof bool) error {
+	if len(data) > 0 {
+		if v.cfg.Record != nil {
+			if err := v.cfg.Record.Input(v.now, data); err != nil {
+				return err
+			}
+		}
+		v.queueInput(data)
+	}
+	if eof {
+		v.inputOpen = false
+		if v.cfg.Record != nil {
+			return v.cfg.Record.InputEOF(v.now)
+		}
+	}
+	return nil
+}
+
+// pollScript delivers the recorded input due at the current step.
+func (v *VM) pollScript() error {
+	evs := v.cfg.Replay.Events
+	for v.scriptPos < len(evs) && evs[v.scriptPos].Step <= v.now {
+		e := evs[v.scriptPos]
+		if e.Step < v.now || v.mmioInFlight {
+			return &ErrReplayDiverged{Step: e.Step, Now: v.now}
+		}
+		v.scriptPos++
+		if e.EOF {
+			v.inputOpen = false
+		} else {
+			v.queueInput(e.Data)
+		}
+	}
+	return nil
+}
+
+// deadline is the step the run loop must stop at next: the run limit, the
+// next checkpoint, or the next recorded input, whichever comes first.
+func (v *VM) deadline(limit uint64) uint64 {
+	d := limit
+	if v.cfg.CheckpointEvery != 0 {
+		d = min(d, v.nextCkpt)
+	}
+	if r := v.cfg.Replay; r != nil && v.scriptPos < len(r.Events) {
+		d = min(d, max(r.Events[v.scriptPos].Step, v.now))
+	}
+	return d
+}
+
+// checkpoint calls Config.Checkpoint when the run loop reaches its step.
+func (v *VM) checkpoint() error {
+	if v.cfg.CheckpointEvery == 0 || v.now < v.nextCkpt {
+		return nil
+	}
+	step := v.nextCkpt
+	v.nextCkpt += v.cfg.CheckpointEvery
+	if v.now != step {
+		return fmt.Errorf("vm: internal error: run loop passed checkpoint step %d (now %d)", step, v.now)
+	}
+	return v.cfg.Checkpoint(step)
 }
 
 // Run executes until the guest exits through HTIF, maxSteps of virtual time
@@ -236,11 +360,24 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 	}
 	for {
 		v.sched.RunDue(v.now)
-		v.pollInput()
+		// Checkpoint before input: a step's checkpoint never includes input
+		// delivered at that step, however the loop arrived there.
+		if err := v.checkpoint(); err != nil {
+			return v.result(false, 0), err
+		}
+		if err := v.pollInput(); err != nil {
+			return v.result(false, 0), err
+		}
 		if v.now >= limit {
 			return v.result(false, 0), nil
 		}
-		budget := min(uint64(maxBatch), limit-v.now)
+		budget := min(uint64(maxBatch), v.deadline(limit)-v.now)
+		if v.mmioInFlight && v.inputOpen && v.cfg.Replay == nil {
+			// Retire just the completed MMIO instruction, so host input
+			// finds a clean boundary even in a guest that polls a device in
+			// a tight loop (ADR-028).
+			budget = 1
+		}
 		if next, ok := v.sched.Next(); ok {
 			if next <= v.now {
 				continue
@@ -251,6 +388,7 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 		if err != nil {
 			return v.result(false, 0), err
 		}
+		v.mmioInFlight = false // the completed access, if any, has retired
 		v.now, v.instret = exit.Steps, exit.Instret
 		if err := v.drainTrace(); err != nil {
 			return v.result(false, 0), err
@@ -266,6 +404,7 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 			if err := v.m.CompleteMMIO(val, !ok); err != nil {
 				return v.result(false, 0), err
 			}
+			v.mmioInFlight = true
 		case machine.ExitMMIOWrite:
 			d, off, ok := v.bus.Lookup(exit.Addr, int(exit.Size))
 			if ok {
@@ -274,6 +413,7 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 			if err := v.m.CompleteMMIO(0, !ok); err != nil {
 				return v.result(false, 0), err
 			}
+			v.mmioInFlight = true
 			if f := v.finished; f != nil {
 				return v.finishRun(*f)
 			}
@@ -309,15 +449,26 @@ func (v *VM) idle(exit machine.Exit, limit uint64) error {
 		target = exit.TimerStep
 	}
 	if target == ^uint64(0) {
-		if !v.inputOpen {
+		switch {
+		case !v.inputOpen:
 			return ErrIdleForever
+		case v.cfg.Replay != nil:
+			// Recorded input will wake the guest; deadline stops there.
+			if v.scriptPos == len(v.cfg.Replay.Events) {
+				return errors.New("vm: replay: the guest waits for input the recording does not have")
+			}
+		default:
+			// Only the host can wake the guest: wait for it. Virtual time
+			// does not move, so the byte arrives at a deterministic step.
+			return v.waitInput()
 		}
-		// Only the host can wake the guest: wait for it. Virtual time does
-		// not move, so the byte arrives at a deterministic step.
-		v.waitInput()
-		return nil
 	}
-	return v.m.AdvanceIdle(min(target, limit) - v.now)
+	n := min(target, v.deadline(limit)) - v.now
+	if err := v.m.AdvanceIdle(n); err != nil {
+		return err
+	}
+	v.now += n // the loop's view of time must follow the core's
+	return nil
 }
 
 // finish records a finisher request; Run returns once the store completes.

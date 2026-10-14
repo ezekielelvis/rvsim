@@ -251,3 +251,57 @@ func TestFinisherEndsTheRun(t *testing.T) {
 		})
 	}
 }
+
+// A hart woken from WFI by timer interrupts must not run past the run
+// loop's deadlines: checkpoints fire exactly at their steps.
+func TestCheckpointsAreExactAcrossIdleWakeups(t *testing.T) {
+	code := Bytes(
+		Lui(T0, 0x2004), // mtimecmp
+		Addi(T1, Zero, 1000),
+		Sd(T1, T0, 0),
+		Auipc(T2, 0),
+		Addi(T2, T2, 40), // handler, below
+		Csrw(0x305, T2),  // mtvec
+		Addi(T1, Zero, 0x80),
+		Csrw(0x304, T1), // mie.MTIE
+		Addi(T1, Zero, 8),
+		Csrw(0x300, T1), // mstatus.MIE
+		Wfi,
+		Jal(Zero, -4),
+		Addi(Zero, Zero, 0),
+		// handler: mtimecmp += 1000 ticks, then stay busy for ~4000 steps
+		Ld(T1, T0, 0),
+		Addi(T1, T1, 1000),
+		Sd(T1, T0, 0),
+		Addi(S1, Zero, 2000),
+		Addi(S1, S1, -1),
+		Bne(S1, Zero, -4),
+		Mret,
+	)
+	cfg := machine.DefaultConfig()
+	cfg.RAMSize = 1 << 20
+	var at []uint64
+	v, err := New(Config{Machine: cfg, CheckpointEvery: 7_777, Checkpoint: func(step uint64) error {
+		at = append(at, step)
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	if err := v.Machine().WritePhys(ramBase, code); err != nil {
+		t.Fatal(err)
+	}
+	res, err := v.Run(200_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(at) != 200_000/7_777 || res.Instret < 50 {
+		t.Fatalf("%d checkpoints, %d instructions", len(at), res.Instret)
+	}
+	for i, s := range at {
+		if s != uint64(i+1)*7_777 {
+			t.Fatalf("checkpoint %d at step %d", i, s)
+		}
+	}
+}
