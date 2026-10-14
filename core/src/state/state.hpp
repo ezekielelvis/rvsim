@@ -2,6 +2,7 @@
 // core snapshots, so the two can never disagree about what state is.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "machine.hpp"
@@ -89,5 +90,12 @@ uint64_t hash_core(const rv_machine& m);
 uint64_t hash_ram(const rv_machine& m);
 // XXH3-64 of {hash_core, hash_ram} as two little-endian u64s.
 uint64_t hash_both(const rv_machine& m);
+
+// Core snapshots (rv_core_snapshot_*): "RVCORE\0\0" | format u32 |
+// payload length u32 | payload (the visit_core fields, little-endian, each
+// at its declared width) | XXH3-64 of everything before it.
+size_t snapshot_size(const rv_machine& m);
+int snapshot_save(const rv_machine& m, uint8_t* buf, size_t len);  // RV_OK or RV_E_BUFSZ
+int snapshot_load(rv_machine& m, const uint8_t* buf, size_t len);   // RV_OK or RV_E_SNAP_*/RV_E_INVAL
 
 }  // namespace rv::state

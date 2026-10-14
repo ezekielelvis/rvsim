@@ -259,17 +259,19 @@ int rv_trace_consume(rv_machine* m) {
 
 int rv_core_snapshot_size(const rv_machine* m, size_t* size_out) {
   if (m == nullptr || size_out == nullptr) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+  *size_out = rv::state::snapshot_size(*m);
+  return RV_OK;
 }
 
-int rv_core_snapshot_save(const rv_machine* m, void* buf, size_t) {
+int rv_core_snapshot_save(const rv_machine* m, void* buf, size_t len) {
   if (m == nullptr || buf == nullptr) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+  return rv::state::snapshot_save(*m, static_cast<uint8_t*>(buf), len);
 }
 
-int rv_core_snapshot_load(rv_machine* m, const void* buf, size_t) {
+// Allowed on a poisoned machine (rv.h): a snapshot's state replaces it.
+int rv_core_snapshot_load(rv_machine* m, const void* buf, size_t len) {
   if (m == nullptr || buf == nullptr) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+  return rv::state::snapshot_load(*m, static_cast<const uint8_t*>(buf), len);
 }
 
 int rv_state_hash(rv_machine* m, uint32_t what, uint64_t* hash_out) {
