@@ -1040,3 +1040,77 @@ read; three replays match every checkpoint and the fault log.
   failure makes `dd` report `I/O error` after the kernel logs the failed
   read and its retry, and an injected corruption changes the checksum of a
   block until the cache is dropped and it is read again.
+
+---
+
+## ADR-032: Performance: decoded-instruction cache and fetch fast path
+
+**Status:** Accepted (Phase 12).
+
+**Target met.** Booting OpenSBI and Linux to the BusyBox prompt takes
+**1.26 s** for 75.8 M instructions, about **60–70 MIPS** on an Apple Silicon
+laptop (`make perf`). The target was under 30 s. The raw interpreter runs a
+mixed integer loop at about 180–240 MIPS; that range is the noise on a busy
+laptop.
+
+**Profile first** (macOS `sample` on the boot benchmark, native frames). Of
+the core's time:
+
+| Cost | Share |
+|---|---|
+| Decoding every fetched instruction (`decode16`/`decode32`) | ~27% |
+| Fetch address translation (`translate`, the TLB path) | ~19% |
+| The interpreter loop and execution | ~44% |
+| The per-step interrupt check | ~3% |
+| Loads and stores | the rest |
+
+**Change: decode cache plus fetch fast path** (before and after interleaved,
+5 runs each):
+
+| Benchmark | Before | After |
+|---|---|---|
+| Linux boot to shell | 1.57 s (42–48 MIPS) | 1.26 s (60–70 MIPS) |
+| Bare-metal loop (M-mode, no paging) | 181–236 MIPS | 175–198 MIPS (within noise) |
+
+- **Decoded-instruction cache:** 32 K direct-mapped entries keyed by the
+  fetch's physical address. An entry is used only if the instruction bits
+  now in RAM equal the cached `raw`, so the check is the invalidation.
+  Stores to code, `WritePhys` from the host, DMA, and stores without
+  `fence.i` are always seen. It is stronger than explicit invalidation and
+  needs no bookkeeping. An instruction straddling a page boundary is never
+  cached, since its second half may map elsewhere. The executor reads the
+  decoded instruction in place, without copying it.
+- **Fetch fast path:** the last fetched page's translation, reused while the
+  privilege level, `satp` and the TLB generation are unchanged. Every TLB
+  flush (`sfence.vma`, a `satp` write, reset, snapshot load) increments the
+  generation. The fast path is only a cache of the TLB, with the same
+  staleness rules the spec allows, so `sfence.vma` semantics are unchanged.
+
+Both caches are performance state only: excluded from state hashes and
+snapshots, and correct to drop at any time. The self-modifying-code tests
+(`core/tests/smc_test.cpp`) cover a store to an already executed 32-bit
+instruction, a store without `fence.i`, a store to a compressed
+instruction, and host writes between runs. All compliance, Spike difftest,
+ACT4, determinism, replay and snapshot tests pass unchanged.
+
+**After the change** the interpreter loop and execution are about 75% of
+the core's time:
+- data-side `translate`: ~8.5%;
+- the interrupt check: ~4.6%;
+- decoding: ~3.5%.
+
+**Not done, and why.** The target is met by a factor of about 24. Two more
+optimizations would help, and are recorded here for when speed matters:
+
+- **Basic-block (threaded) dispatch** to cut the per-instruction loop
+  overhead, the remaining hotspot.
+- **A data-access TLB fast path.**
+
+Basic-block dispatch changes how every instruction reaches its handler. It
+must keep exact step accounting, interrupts between instructions,
+breakpoints and MMIO re-execution, so it carries real correctness risk for
+a gain the target does not need.
+
+UART output exits cost about 0.3 µs a character (ADR-022's boundary
+numbers), negligible next to boot time, so batching them was not worth its
+complexity.

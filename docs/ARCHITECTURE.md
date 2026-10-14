@@ -102,6 +102,14 @@ rvsim gdb -at 20000000 -firmware build/images/fw_jump.bin -kernel build/images/I
 gdb-multiarch build/images/vmlinux -ex 'target remote localhost:1234' -ex 'break kernel_execve' -ex continue -ex bt
 ```
 
+## Interpreter performance
+
+Booting OpenSBI and Linux to the BusyBox shell takes about 1.3 s, 76 M
+instructions at roughly 60–70 MIPS (`make perf`). The interpreter caches
+decoded instructions by physical address and the current fetch page's
+translation (ADR-032). Both are checked against RAM and the TLB generation,
+so self-modifying code and `sfence.vma` behave exactly as without them.
+
 ## Boundary performance
 
 These numbers are a Phase 4 baseline. They were measured on an Apple Silicon
