@@ -11,6 +11,7 @@ import (
 
 	"github.com/ezekielelvis/rvsim/vmm/baremetal"
 	"github.com/ezekielelvis/rvsim/vmm/boot"
+	"github.com/ezekielelvis/rvsim/vmm/devices/virtio/blk"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
 	"github.com/ezekielelvis/rvsim/vmm/vm"
 )
@@ -117,15 +118,18 @@ func bootCmd(args []string) int {
 	fs := flag.NewFlagSet("boot", flag.ExitOnError)
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), "usage: rvsim boot [flags] -firmware fw_jump.bin -kernel Image\n\n"+
-			"Boots OpenSBI fw_jump and a Linux Image (with an optional initramfs) on the\n"+
-			"rvsim platform. The UART is the console: its output goes to stdout and\n"+
-			"standard input is fed to it.\n\nflags:\n")
+			"Boots OpenSBI fw_jump and a Linux Image on the rvsim platform, with an\n"+
+			"optional initramfs and virtio disk. The UART is the console: its output\n"+
+			"goes to stdout and standard input is fed to it. Guest writes to the disk\n"+
+			"go straight to the image file.\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	firmware := fs.String("firmware", "", "OpenSBI fw_jump `binary`, loaded at the start of RAM")
 	kernel := fs.String("kernel", "", "Linux `Image`, loaded at RAM + 2 MiB")
 	initrd := fs.String("initrd", "", "initramfs `file` (cpio)")
-	appendArgs := fs.String("append", "console=ttyS0 earlycon", "kernel command `line`")
+	disk := fs.String("disk", "", "disk `image` for a virtio block device (/dev/vda in Linux)")
+	diskRO := fs.Bool("disk-ro", false, "make the disk read-only")
+	appendArgs := fs.String("append", "", "kernel command `line` (default \"console=ttyS0 earlycon\", plus\n\"root=/dev/vda rw\" with -disk and no -initrd)")
 	memMiB := fs.Uint64("mem", 256, "RAM size in `MiB`")
 	maxSteps := fs.Uint64("max-steps", 0, "stop after `n` steps (0: no limit)")
 	tracePath := fs.String("trace", "", traceUsage)
@@ -137,6 +141,12 @@ func bootCmd(args []string) int {
 
 	var img boot.Images
 	img.Bootargs = *appendArgs
+	if img.Bootargs == "" {
+		img.Bootargs = "console=ttyS0 earlycon"
+		if *disk != "" && *initrd == "" {
+			img.Bootargs += " root=/dev/vda rw"
+		}
+	}
 	for _, f := range []struct {
 		path string
 		dst  *[]byte
@@ -160,7 +170,17 @@ func bootCmd(args []string) int {
 
 	cfg := machine.DefaultConfig()
 	cfg.RAMSize = *memMiB << 20
-	v, err := vm.New(vm.Config{Machine: cfg, Console: os.Stdout, Input: readInput(os.Stdin), Trace: trace})
+	vcfg := vm.Config{Machine: cfg, Console: os.Stdout, Input: readInput(os.Stdin), Trace: trace}
+	if *disk != "" {
+		d, closeDisk, err := openDisk(*disk, *diskRO)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "rvsim:", err)
+			return 1
+		}
+		defer closeDisk()
+		vcfg.Disk = d
+	}
+	v, err := vm.New(vcfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rvsim:", err)
 		return 1
@@ -186,6 +206,29 @@ func bootCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "rvsim: guest requested a reboot after %d steps; stopping\n", res.Steps)
 	}
 	return int(min(res.ExitCode, 255))
+}
+
+// openDisk opens a disk image for a virtio block device.
+func openDisk(path string, readOnly bool) (*blk.Config, func(), error) {
+	mode := os.O_RDWR
+	if readOnly {
+		mode = os.O_RDONLY
+	}
+	f, err := os.OpenFile(path, mode, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if st.Size()%blk.SectorSize != 0 {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s: size %d is not a multiple of %d bytes", path, st.Size(), blk.SectorSize)
+	}
+	cfg := &blk.Config{Disk: f, Size: uint64(st.Size()), ReadOnly: readOnly, Serial: "rvsim-disk0"}
+	return cfg, func() { f.Close() }, nil
 }
 
 // readInput copies r into a channel byte by byte. The run loop alone decides
