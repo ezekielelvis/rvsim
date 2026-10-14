@@ -19,13 +19,14 @@ cc=${RISCV_PREFIX:-riscv64-unknown-elf-}gcc
 # than an associative array: macOS ships bash 3.2.)
 # Each suite is assembled for exactly the extension it tests, as upstream
 # does, so e.g. rv64ui exercises 32-bit encodings only.
-suites="rv64ui rv64um rv64ua rv64uc"
+suites="rv64ui rv64um rv64ua rv64uc rv64mi rv64si"
 suite_march() {
   case $1 in
     rv64ui) echo rv64i_zicsr_zifencei ;;
     rv64um) echo rv64im_zicsr_zifencei ;;
     rv64ua) echo rv64ia_zicsr_zifencei ;;
     rv64uc) echo rv64ic_zicsr_zifencei ;;
+    rv64mi | rv64si) echo rv64imac_zicsr_zifencei ;;
     *) echo "unknown suite $1" >&2; exit 1 ;;
   esac
 }
