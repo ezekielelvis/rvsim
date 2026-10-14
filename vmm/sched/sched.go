@@ -6,7 +6,10 @@
 // snapshot can save and restore.
 package sched
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // Handler receives the events scheduled for it.
 type Handler interface {
@@ -63,6 +66,20 @@ func (s *Scheduler) Next() (uint64, bool) {
 	}
 	return s.heap[0].At, true
 }
+
+// Pending returns the pending events in firing order, (At, Seq). It
+// allocates; use it for hashing and snapshots, not on the hot path.
+func (s *Scheduler) Pending() []Event {
+	evs := append([]Event(nil), s.heap...)
+	sort.Slice(evs, func(i, j int) bool { return less(&evs[i], &evs[j]) })
+	return evs
+}
+
+// Name returns the name a target was registered under.
+func (s *Scheduler) Name(t Target) string { return s.names[t] }
+
+// Seq returns the sequence number the next scheduled event will get.
+func (s *Scheduler) Seq() uint64 { return s.seq }
 
 // Len returns the number of pending events.
 func (s *Scheduler) Len() int { return len(s.heap) }
