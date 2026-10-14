@@ -51,10 +51,13 @@ if(RVSIM_BUILD_TESTS)
   add_executable(rvcore_tests
     tests/abi_test.cpp
     tests/alu_test.cpp
+    tests/atomic_test.cpp
+    tests/compressed_test.cpp
     tests/control_test.cpp
     tests/decode_test.cpp
     tests/header_c_test.c
     tests/memory_test.cpp
+    tests/muldiv_test.cpp
     tests/system_test.cpp
   )
   target_include_directories(rvcore_tests PRIVATE src)
