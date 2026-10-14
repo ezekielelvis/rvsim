@@ -13,6 +13,8 @@ import (
 	"github.com/ezekielelvis/rvsim/vmm/devices/finisher"
 	"github.com/ezekielelvis/rvsim/vmm/devices/plic"
 	"github.com/ezekielelvis/rvsim/vmm/devices/uart"
+	"github.com/ezekielelvis/rvsim/vmm/devices/virtio"
+	"github.com/ezekielelvis/rvsim/vmm/devices/virtio/blk"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
 	"github.com/ezekielelvis/rvsim/vmm/sched"
 	"github.com/ezekielelvis/rvsim/vmm/trace"
@@ -24,6 +26,10 @@ const (
 	PLICBase     = 0x0c00_0000
 	UARTBase     = 0x1000_0000
 	UARTIRQ      = 10 // PLIC source
+	// VirtioBase is the virtio-mmio block device (present with Config.Disk)
+	// at PLIC source VirtioIRQ: QEMU virt's first virtio slot.
+	VirtioBase = 0x1000_1000
+	VirtioIRQ  = 1
 )
 
 // InputSpacing is the virtual time, in steps, between successive host input
@@ -46,6 +52,8 @@ type Config struct {
 	HTIF bool
 	// Trace, if set, receives a Spike --log-commits style commit log.
 	Trace io.Writer
+	// Disk, if set, adds a virtio block device backed by Disk.Disk.
+	Disk *blk.Config
 }
 
 // Result describes why Run returned.
@@ -114,6 +122,16 @@ func New(cfg Config) (*VM, error) {
 			return nil, err
 		}
 	}
+	if cfg.Disk != nil {
+		d, err := blk.New(*cfg.Disk, m, v.plic.Line(VirtioIRQ), &v.sched, v.Now)
+		if err == nil {
+			err = v.bus.Map("virtio-blk", VirtioBase, virtio.Size, d)
+		}
+		if err != nil {
+			m.Close()
+			return nil, err
+		}
+	}
 	v.self = v.sched.Register("vm", v)
 	if cfg.Trace != nil {
 		if err := m.EnableTrace(1 << 20); err != nil {
@@ -124,6 +142,9 @@ func New(cfg Config) (*VM, error) {
 	}
 	return v, nil
 }
+
+// HasDisk reports whether the VM has a virtio block device.
+func (v *VM) HasDisk() bool { return v.cfg.Disk != nil }
 
 // Close releases the machine.
 func (v *VM) Close() { v.m.Close() }

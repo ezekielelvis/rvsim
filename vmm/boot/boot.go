@@ -12,6 +12,7 @@ import (
 	"github.com/ezekielelvis/rvsim/vmm/devices/finisher"
 	"github.com/ezekielelvis/rvsim/vmm/devices/plic"
 	"github.com/ezekielelvis/rvsim/vmm/devices/uart"
+	"github.com/ezekielelvis/rvsim/vmm/devices/virtio"
 	"github.com/ezekielelvis/rvsim/vmm/fdt"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
 	"github.com/ezekielelvis/rvsim/vmm/vm"
@@ -60,6 +61,7 @@ type Platform struct {
 	RAMBase, RAMSize       uint64
 	CLINTBase              uint64
 	Svadu                  bool // menvcfg.ADUE is writable
+	VirtioBlk              bool // a virtio-mmio block device at vm.VirtioBase
 	Bootargs               string
 	InitrdStart, InitrdEnd uint64 // zero when there is no initramfs
 }
@@ -121,6 +123,12 @@ func DeviceTree(p Platform) ([]byte, error) {
 			U32("regmap", phandleFinisher).U32("offset", 0).U32("value", r.value)
 	}
 
+	if p.VirtioBlk {
+		vb := soc.Child(fmt.Sprintf("virtio_mmio@%x", vm.VirtioBase))
+		vb.String("compatible", "virtio,mmio").U64("reg", vm.VirtioBase, virtio.Size)
+		vb.U32("interrupts", vm.VirtioIRQ).U32("interrupt-parent", phandlePLIC)
+	}
+
 	ser := soc.Child(fmt.Sprintf("serial@%x", vm.UARTBase))
 	ser.String("compatible", "ns16550a").U64("reg", vm.UARTBase, uart.Size)
 	ser.U32("clock-frequency", UARTClock).U32("interrupts", vm.UARTIRQ).U32("interrupt-parent", phandlePLIC)
@@ -161,7 +169,7 @@ func Load(v *vm.VM, cfg machine.Config, img Images) error {
 
 	p := Platform{
 		RAMBase: cfg.RAMBase, RAMSize: cfg.RAMSize, CLINTBase: cfg.CLINTBase,
-		Svadu: cfg.Flags&machine.FlagHWADUpdate != 0, Bootargs: img.Bootargs,
+		Svadu: cfg.Flags&machine.FlagHWADUpdate != 0, VirtioBlk: v.HasDisk(), Bootargs: img.Bootargs,
 	}
 	if len(img.Initrd) > 0 {
 		start := (top - uint64(len(img.Initrd))) &^ 0xfff

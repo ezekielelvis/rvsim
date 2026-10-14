@@ -17,7 +17,7 @@ func platform() Platform {
 	cfg := machine.DefaultConfig()
 	return Platform{
 		RAMBase: cfg.RAMBase, RAMSize: cfg.RAMSize, CLINTBase: cfg.CLINTBase, Svadu: true,
-		Bootargs: "console=ttyS0 earlycon", InitrdStart: 0x8f00_0000, InitrdEnd: 0x8f00_1234,
+		VirtioBlk: true, Bootargs: "console=ttyS0 earlycon", InitrdStart: 0x8f00_0000, InitrdEnd: 0x8f00_1234,
 	}
 }
 
@@ -69,6 +69,10 @@ func TestDeviceTreeDescribesThePlatform(t *testing.T) {
 		"reboot {",
 		"value = <0x7777>;",
 		"regmap = <0x03>;",
+		"virtio_mmio@10001000 {",
+		`compatible = "virtio,mmio";`,
+		"reg = <0x00 0x10001000 0x00 0x1000>;",
+		"interrupts = <0x01>;",
 		"serial@10000000 {",
 		`compatible = "ns16550a";`,
 		"interrupts = <0x0a>;",
@@ -83,9 +87,9 @@ func TestDeviceTreeDescribesThePlatform(t *testing.T) {
 	}
 }
 
-func TestDeviceTreeWithoutSvaduOrInitrd(t *testing.T) {
+func TestDeviceTreeWithoutOptionalDevices(t *testing.T) {
 	p := platform()
-	p.Svadu, p.InitrdStart, p.InitrdEnd = false, 0, 0
+	p.Svadu, p.VirtioBlk, p.InitrdStart, p.InitrdEnd = false, false, 0, 0
 	blob, err := DeviceTree(p)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +98,7 @@ func TestDeviceTreeWithoutSvaduOrInitrd(t *testing.T) {
 	if !strings.Contains(dts, `riscv,isa = "rv64imac_zicsr_zifencei_zicntr_svade";`) {
 		t.Error("expected Svade only")
 	}
-	if strings.Contains(dts, "svadu") || strings.Contains(dts, "linux,initrd") {
+	if strings.Contains(dts, "svadu") || strings.Contains(dts, "linux,initrd") || strings.Contains(dts, "virtio") {
 		t.Errorf("unexpected properties:\n%s", dts)
 	}
 }
