@@ -69,7 +69,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Cache pinned Spike
+      - name: Cache pinned Spike, Sail and GCC
         uses: actions/cache@v4
         with:
           path: ~/.cache/rvsim-tools
@@ -77,6 +77,7 @@ jobs:
       - name: Install toolchains, Spike and Sail
         run: |
           scripts/toolchain.sh --install
+          echo "$HOME/.cache/rvsim-tools/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Compliance
         run: make compliance

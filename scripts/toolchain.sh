@@ -14,6 +14,9 @@ set -euo pipefail
 SPIKE_REPO=https://github.com/riscv-software-src/riscv-isa-sim.git
 SPIKE_COMMIT=cae29438a126b9ff76ad50dc9266483b6c94b0e5  # master, 2026-09-12
 SAIL_VERSION=0.14.1  # the version ACT4 (riscv-arch-test) is tested with
+# Prebuilt riscv64-unknown-elf GCC for Ubuntu, as ACT4's CI uses: ACT4 needs
+# GCC 15+, and Ubuntu 24.04's gcc-riscv64-unknown-elf package is 13.
+GCC_RELEASE=2026.08.27
 GO_MIN=1.26
 RVSIM_TOOLS=${RVSIM_TOOLS:-$HOME/.cache/rvsim-tools}
 
@@ -35,13 +38,39 @@ install_packages() {
   elif command -v apt-get >/dev/null; then
     sudo apt-get update
     sudo apt-get install -y --no-install-recommends \
-      build-essential cmake git device-tree-compiler \
-      gcc-riscv64-unknown-elf gcc-riscv64-linux-gnu \
-      libboost-regex-dev libboost-system-dev
+      build-essential cmake git curl xz-utils file device-tree-compiler \
+      gcc-riscv64-linux-gnu libboost-regex-dev libboost-system-dev
+    install_riscv_gcc
     command -v mise >/dev/null || curl -fsSL https://mise.run | sh
   else
     echo "unsupported host: install tools manually" >&2
     exit 1
+  fi
+}
+
+# riscv64-unknown-elf GCC on Linux: riscv-collab's prebuilt release where one
+# exists for this distro, otherwise the distro package (older than ACT4 needs).
+install_riscv_gcc() {
+  local stamp="$RVSIM_TOOLS/gcc.release"
+  if [[ -x $RVSIM_TOOLS/bin/riscv64-unknown-elf-gcc && -f $stamp && $(cat "$stamp") == "$GCC_RELEASE" ]]; then
+    echo "riscv64-unknown-elf-gcc $GCC_RELEASE already installed"
+    return
+  fi
+  local id="" ver=""
+  # shellcheck disable=SC1091
+  [[ -f /etc/os-release ]] && { id=$(. /etc/os-release && echo "$ID"); ver=$(. /etc/os-release && echo "$VERSION_ID"); }
+  if [[ $id == ubuntu && ($ver == 22.04 || $ver == 24.04) && $(uname -m) == x86_64 ]]; then
+    local dl
+    dl=$(mktemp -d)
+    curl -fsSL --retry 5 -o "$dl/gcc.tar.xz" \
+      "https://github.com/riscv-collab/riscv-gnu-toolchain/releases/download/$GCC_RELEASE/riscv64-elf-ubuntu-$ver-gcc.tar.xz"
+    mkdir -p "$RVSIM_TOOLS"
+    tar -xJf "$dl/gcc.tar.xz" -C "$RVSIM_TOOLS" --strip-components=1
+    rm -rf "$dl"
+    echo "$GCC_RELEASE" >"$stamp"
+  else
+    echo "no prebuilt toolchain for $id $ver $(uname -m); using the distro package (ACT4 needs GCC 15+)" >&2
+    sudo apt-get install -y --no-install-recommends gcc-riscv64-unknown-elf
   fi
 }
 
