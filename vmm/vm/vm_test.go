@@ -3,6 +3,7 @@ package vm
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	. "github.com/ezekielelvis/rvsim/vmm/internal/rvasm"
@@ -303,5 +304,26 @@ func TestCheckpointsAreExactAcrossIdleWakeups(t *testing.T) {
 		if s != uint64(i+1)*7_777 {
 			t.Fatalf("checkpoint %d at step %d", i, s)
 		}
+	}
+}
+
+// A run that stops at its step limit still delivers its whole trace.
+func TestTraceIsFlushedWhenRunStopsAtItsLimit(t *testing.T) {
+	cfg := machine.DefaultConfig()
+	cfg.RAMSize = 1 << 20
+	var tr bytes.Buffer
+	v, err := New(Config{Machine: cfg, Trace: &tr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	if err := v.Machine().WritePhys(ramBase, Bytes(Addi(T0, T0, 1), Jal(Zero, -4))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Run(10); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(tr.String(), "\n"); n != 10 {
+		t.Fatalf("%d trace lines after 10 steps:\n%s", n, tr.String())
 	}
 }

@@ -413,8 +413,17 @@ func (v *VM) checkpoint() error {
 }
 
 // Run executes until the guest exits through HTIF, maxSteps of virtual time
-// have passed (Result.Exited false), or an error occurs.
+// have passed (Result.Exited false), or an error occurs. The trace, if any,
+// is flushed whenever Run returns.
 func (v *VM) Run(maxSteps uint64) (Result, error) {
+	res, err := v.run(maxSteps)
+	if ferr := v.flushTrace(); err == nil {
+		err = ferr
+	}
+	return res, err
+}
+
+func (v *VM) run(maxSteps uint64) (Result, error) {
 	limit := v.now + maxSteps
 	if limit < v.now {
 		limit = ^uint64(0)
