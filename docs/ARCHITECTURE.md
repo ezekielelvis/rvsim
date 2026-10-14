@@ -92,6 +92,16 @@ the core, RAM and VMM state every N steps (ADR-028; `docs/REPLAY.md`).
 Snapshots save the whole machine at a run-loop boundary, and restoring one
 continues exactly as the original would have (ADR-029).
 
+## Debugging
+
+`rvsim gdb` serves a live machine to GDB, and `rvsim replay -gdb` serves a
+recording with `reverse-stepi` and `reverse-continue` (ADR-030):
+
+```sh
+rvsim gdb -at 20000000 -firmware build/images/fw_jump.bin -kernel build/images/Image -initrd build/images/rootfs.cpio
+gdb-multiarch build/images/vmlinux -ex 'target remote localhost:1234' -ex 'break kernel_execve' -ex continue -ex bt
+```
+
 ## Boundary performance
 
 These numbers are a Phase 4 baseline. They were measured on an Apple Silicon

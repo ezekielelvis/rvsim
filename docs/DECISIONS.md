@@ -907,3 +907,67 @@ live host input is attached, idle time is paced to the host clock at
 The wall clock still only decides when live input arrives, which the
 recording captures. Replays, scheduled input and runs without live input
 never consult it.
+
+---
+
+## ADR-030: GDB remote stub and reverse execution
+
+**Status:** Accepted (Phase 10).
+
+**Stub** (`vmm/gdb`, `rvsim gdb`, `rvsim replay -gdb`). GDB Remote Serial
+Protocol over TCP, all-stop, a single thread.
+
+- **Target description** (`qXfer:features:read`): `org.gnu.gdb.riscv.cpu`
+  (x0–x31 by ABI name, pc), `org.gnu.gdb.riscv.csr` (the CSRs rvsim
+  implements, numbered 65 + CSR as in GDB), and `org.gnu.gdb.riscv.virtual`
+  (`priv`, register 4161). There are no FP registers.
+- **Packets:**
+  - `g`/`G` and `p`/`P` (unimplemented CSRs read as unavailable);
+  - `m`/`M` (RAM only, page by page; device registers are not read);
+  - `Z0`/`Z1`/`z0`/`z1`;
+  - `c`, `s` and `vCont`;
+  - Ctrl-C (`0x03`);
+  - `D` (detach; the guest runs on), `k` (kill);
+  - `bs`/`bc` (reverse);
+  - `QStartNoAckMode`.
+  
+  Watchpoints (`Z2`–`Z4`) are not supported, and the core rejects
+  read/write breakpoints with `RV_E_UNSUPPORTED`.
+- **Debugger addresses** go through a Go-side Sv39 walk that ignores
+  permissions (U, SUM, R/W/X), so `vmlinux` addresses resolve whether the hart
+  is in U-, S- or M-mode. If the walk fails while the hart is in M-mode,
+  which runs untranslated, the address is taken as physical. Writes use
+  `WritePhys`, so the core sees them.
+- **Breakpoints** live in the core (`rv_add_breakpoint`, up to 64, execution
+  only, matched on the virtual pc, or the physical pc with `RV_BP_PHYS`),
+  never in guest memory. They are debugger state, excluded from hashes and
+  snapshots, so debugging never changes what the guest sees. Each is checked
+  before an instruction executes. One at the starting pc of an `rv_run` is
+  not re-reported, which is how execution resumes from it.
+- **Single step** is one step: an instruction or a trap entry.
+- **Continue** runs in chunks (1 M steps) and polls for Ctrl-C between them.
+
+**Reverse execution** (`rvsim replay -gdb`). A replay is deterministic, so
+going back means restoring a snapshot and replaying forward:
+
+- **Snapshots:** running forward saves one every 50 M steps.
+- **`reverse-stepi`:** goes to step `now - 1`.
+- **`reverse-continue`:** scans backwards one snapshot window at a time. It
+  replays each window to the current step with the breakpoints set, then
+  jumps to the last hit. With none, it stops at the start
+  (`replaylog:begin`).
+- **End:** forward execution stops at the recording's end
+  (`replaylog:end`).
+- **Steps, not instructions:** reverse steps are steps, so a step back across
+  an idle period stays at the same pc until the idle time is used up.
+
+Live sessions (`rvsim gdb`) have no history. Record them and debug the
+replay to go backwards.
+
+**Acceptance.** The real GDB (18.1 locally, `gdb-multiarch` in CI) loads
+`vmlinux`, which the image build now exports with DWARF 5 and frame
+pointers, and attaches to the booting kernel. It breaks at `kernel_execve`,
+hits it with `kernel_filename = "/init"`, and backtraces through
+`run_init_process` and `kernel_init` to `ret_from_fork`. It also reads
+`priv` and memory through the kernel's page tables. A second test drives
+`reverse-continue` and `reverse-stepi` on a replay.
