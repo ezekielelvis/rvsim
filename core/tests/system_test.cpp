@@ -68,14 +68,14 @@ TEST_F(Cpu, UnimplementedCsrIsIllegal) {
 }
 
 TEST_F(Cpu, MstatusLegalization) {
-  // Priv §3.1.6: UXL/SXL read 2. Without an MMU, SUM is read-only zero; MXR
-  // and TVM exist because S-mode does (ADR-016). FS exists with S-mode, and
-  // SD reflects FS=Dirty.
+  // Priv §3.1.6: UXL/SXL read 2. SUM, MXR and TVM exist with S-mode and
+  // Sv39. FS exists with S-mode, and SD reflects FS=Dirty.
   program({csrrw(0, kMstatus, 1), csrrs(3, kMstatus, 0)});
   set_x(1, ~0ull);
   run(2);
   const uint64_t writable = (1u << 1) | (1u << 3) | (1u << 5) | (1u << 7) | (1u << 8) | (3u << 11) |
-                            (3u << 13) | (1u << 17) | (1u << 19) | (1u << 20) | (1u << 21) | (1u << 22);
+                            (3u << 13) | (1u << 17) | (1u << 18) | (1u << 19) | (1u << 20) | (1u << 21) |
+                            (1u << 22);
   EXPECT_EQ(x(3), kXL | writable | (1ull << 63));
   set_csr(kMstatus, 2u << 11);  // MPP = 2 (reserved H) legalizes to U
   EXPECT_EQ(csr(kMstatus), kXL);

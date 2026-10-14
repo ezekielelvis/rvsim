@@ -38,8 +38,8 @@ class Priv : public Cpu {
 TEST_F(Priv, DelegatableExceptionMask) {
   set_csr(kMedeleg, ~0ull);
   // Everything that can occur except misaligned fetch (impossible with C)
-  // and ECALL from M (read-only zero, Priv §3.1.8). No page faults yet.
-  EXPECT_EQ(csr(kMedeleg), 0x3feu);
+  // and ECALL from M (read-only zero, Priv §3.1.8), plus page faults.
+  EXPECT_EQ(csr(kMedeleg), 0xb3feu);
   set_csr(kMideleg, ~0ull);
   EXPECT_EQ(csr(kMideleg), 0x222u);  // SSI, STI, SEI
 }
@@ -473,14 +473,14 @@ TEST_F(Priv, SstatusWriteIsLoggedAsMstatus) {
   EXPECT_EQ(r->csr, kMstatus);
 }
 
-// ------------------------------------------------- no MMU yet (ADR-016)
+// ------------------------------------------------------------- satp / TVM
 
-TEST_F(Priv, SatpIsReadOnlyBareWithoutMmu) {
-  program({csrrw(0, kSatp, 1)});
-  set_x(1, (8ull << 60) | 0x1234);  // Sv39: unsupported, so the write is ignored
-  set_priv(1);
-  run(1);
-  EXPECT_EQ(pc(), kRamBase + 4);
+TEST_F(Priv, SatpModeIsWarl) {
+  set_csr(kSatp, (8ull << 60) | (0x1234ull << 44) | 0xabc);  // Sv39
+  EXPECT_EQ(csr(kSatp), (8ull << 60) | (0x1234ull << 44) | 0xabc);
+  set_csr(kSatp, (9ull << 60) | 0x55);  // Sv48 is unsupported: MODE stays Sv39
+  EXPECT_EQ(csr(kSatp), (8ull << 60) | 0x55);
+  set_csr(kSatp, 0);
   EXPECT_EQ(csr(kSatp), 0u);
 }
 
