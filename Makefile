@@ -7,7 +7,7 @@ JOBS       ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 GO         ?= go
 CMAKE      ?= cmake
 
-.PHONY: all core core-test go-build go-test lint test sanitize go-asan riscv-tests compliance difftest archtest-elfs archtest bench toolchain clean
+.PHONY: all core core-test go-build go-test lint test sanitize go-asan riscv-tests compliance difftest archtest-elfs archtest platform bench toolchain clean
 
 all: go-build
 
@@ -64,6 +64,10 @@ archtest-elfs:
 ## archtest: run the generated ACT4 ELFs on rvsim
 archtest: core
 	$(GO) test -count=1 ./tests/archtest
+
+## platform: bare-metal programs exercising the devices (needs riscv64-unknown-elf-gcc)
+platform: core
+	$(GO) test -count=1 ./tests/platform
 
 bench: core
 	$(GO) test -run '^$$' -bench . -benchmem ./...

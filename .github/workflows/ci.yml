@@ -83,6 +83,8 @@ jobs:
         run: make compliance
       - name: Difftest against Spike
         run: make difftest
+      - name: Platform (devices and interrupts)
+        run: make platform
       - name: Cache ACT4 ELFs
         id: act4-cache
         uses: actions/cache@v4
