@@ -69,6 +69,19 @@ struct rv_machine {
     uint64_t value = 0;  // store data, or the completed load result
   } mmio;
 
+  // Execution breakpoints (debugger state, not machine state: excluded from
+  // hashes and snapshots). kind is RV_BP_EXEC, optionally with RV_BP_PHYS.
+  struct Breakpoint {
+    bool used = false;
+    bool phys = false;
+    uint64_t addr = 0;
+    uint64_t len = 0;
+  };
+  static constexpr unsigned kMaxBreakpoints = 64;
+  Breakpoint bp[kMaxBreakpoints];
+  unsigned bp_count = 0;   // breakpoints in use
+  uint32_t bp_hit = 0;     // id of the breakpoint the last rv_run stopped at
+
   // Run-loop state.
   bool in_wfi = false;
   bool poisoned = false;

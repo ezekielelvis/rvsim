@@ -750,9 +750,41 @@ Step step(rv_machine* m) {
   return m->htif_halt ? Step::Halt : Step::Retired;
 }
 
+// Whether an execution breakpoint covers the pc about to execute; sets
+// m->bp_hit. Physical breakpoints translate the pc without side effects.
+bool at_breakpoint(rv_machine* m) {
+  const uint64_t pc = m->hart.pc;
+  uint64_t ppc = 0;
+  bool have_ppc = false;
+  for (uint32_t i = 0; i < rv_machine::kMaxBreakpoints; ++i) {
+    const auto& b = m->bp[i];
+    if (!b.used) continue;
+    uint64_t a = pc;
+    if (b.phys) {
+      if (!have_ppc) {
+        const Translation t = translate_debug(m, pc, Access::Fetch);
+        if (!t.ok()) continue;
+        ppc = t.paddr;
+        have_ppc = true;
+      }
+      a = ppc;
+    }
+    if (a >= b.addr && a - b.addr < b.len) {
+      m->bp_hit = i;
+      return true;
+    }
+  }
+  return false;
+}
+
 template <bool kTrace>
 rv_exit_reason loop(rv_machine* m, uint64_t end) {
+  // An exec breakpoint at the starting pc is not re-reported (rv.h): that is
+  // how a debugger resumes from one.
+  bool first = true;
   while (m->steps < end) {
+    if (m->bp_count != 0 && !first && !m->in_wfi && at_breakpoint(m)) return RV_EXIT_BREAKPOINT;
+    first = false;
     // A hart in WFI stays idle until an interrupt is pending; the VMM decides
     // how much virtual time passes (rv_advance_idle).
     if (m->in_wfi) {
@@ -813,6 +845,10 @@ void run(rv_machine* m, uint64_t max_steps) {
       m->exit.addr = m->mmio.addr;
       m->exit.size = m->mmio.size;
       m->exit.value = m->mmio.is_store ? m->mmio.value : 0;
+      break;
+    case RV_EXIT_BREAKPOINT:
+      m->exit.addr = m->hart.pc;
+      m->exit.value = m->bp_hit;
       break;
     case RV_EXIT_ERROR:
       // Re-executing an instruction to finish its MMIO access reached a

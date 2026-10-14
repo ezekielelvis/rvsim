@@ -217,14 +217,28 @@ int rv_translate(const rv_machine* m, uint64_t vaddr, uint32_t access, uint64_t*
   return RV_OK;
 }
 
-int rv_add_breakpoint(rv_machine* m, uint64_t, uint64_t, uint32_t, uint32_t* id_out) {
-  if (m == nullptr || id_out == nullptr) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+// Execution breakpoints only; read/write watchpoints are not implemented.
+int rv_add_breakpoint(rv_machine* m, uint64_t addr, uint64_t len, uint32_t kind, uint32_t* id_out) {
+  if (m == nullptr || id_out == nullptr || len == 0 || addr + (len - 1) < addr) return RV_E_INVAL;
+  if ((kind & ~(RV_BP_EXEC | RV_BP_READ | RV_BP_WRITE | RV_BP_PHYS)) != 0) return RV_E_INVAL;
+  if ((kind & (RV_BP_READ | RV_BP_WRITE)) != 0) return RV_E_UNSUPPORTED;
+  if ((kind & RV_BP_EXEC) == 0) return RV_E_INVAL;
+  for (uint32_t i = 0; i < rv_machine::kMaxBreakpoints; ++i) {
+    auto& b = m->bp[i];
+    if (b.used) continue;
+    b = rv_machine::Breakpoint{true, (kind & RV_BP_PHYS) != 0, addr, len};
+    m->bp_count++;
+    *id_out = i;
+    return RV_OK;
+  }
+  return RV_E_NOMEM;
 }
 
-int rv_remove_breakpoint(rv_machine* m, uint32_t) {
-  if (m == nullptr) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+int rv_remove_breakpoint(rv_machine* m, uint32_t id) {
+  if (m == nullptr || id >= rv_machine::kMaxBreakpoints || !m->bp[id].used) return RV_E_INVAL;
+  m->bp[id] = rv_machine::Breakpoint{};
+  m->bp_count--;
+  return RV_OK;
 }
 
 int rv_trace_enable(rv_machine* m, size_t capacity_bytes) {

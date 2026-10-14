@@ -73,6 +73,7 @@ if(RVSIM_BUILD_TESTS)
     tests/memory_test.cpp
     tests/mmu_test.cpp
     tests/state_test.cpp
+    tests/breakpoint_test.cpp
     tests/mmio_test.cpp
     tests/muldiv_test.cpp
     tests/privileged_test.cpp
