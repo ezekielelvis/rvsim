@@ -52,10 +52,8 @@ if [[ $(uname -s) == Darwin ]]; then
   done
 fi
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
-# ACT4's default exclusions (Sdtrig), plus the interrupt suites: raising
-# external, timer and software interrupts needs the CLINT/PLIC MMIO that
-# arrives in Phase 4.
-exclude=SdtrigSm,SdtrigS,SdtrigU,InterruptsSm,InterruptsS,InterruptsU
+# ACT4's default exclusions: rvsim has no Sdtrig debug triggers.
+exclude=SdtrigSm,SdtrigS,SdtrigU
 mise exec -- make CONFIG_FILES="$config" WORKDIR="$work" EXCLUDE_EXTENSIONS="$exclude" \
   FAST=True CLEAN_INTERMEDIATES=True -j"$jobs"
 echo "ACT4 ELFs: $(find "$work/rvsim-rv64imac/elfs" -name '*.elf' | wc -l | tr -d ' ') in $work/rvsim-rv64imac/elfs"

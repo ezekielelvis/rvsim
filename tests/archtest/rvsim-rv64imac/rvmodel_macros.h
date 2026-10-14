@@ -90,73 +90,88 @@
 
 ##### Machine Timer #####
 
-#define RVMODEL_MTIMECMP_ADDRESS  0x02004000  /* Address of mtimecmp CSR */
+#define RVMODEL_MTIMECMP_ADDRESS  0x02004000  /* CLINT mtimecmp */
+#define RVMODEL_MTIME_ADDRESS     0x0200BFF8  /* CLINT mtime */
 
-#define RVMODEL_MTIME_ADDRESS  0x0200BFF8  /* Address of mtime CSR */
+// rvsim's mtime advances once every steps_per_tick (10 by default) steps.
+#define RVMODEL_MAX_CYCLES_PER_TIMER_TICK 10
 
-##### Machine Interrupts #####
-#define RVMODEL_MAX_CYCLES_PER_TIMER_TICK 1
-
-// Interrupt latency configuration
-#define RVMODEL_INTERRUPT_LATENCY 10
-
+// Enough ticks to reach the lower privilege mode before the timer fires.
 #define RVMODEL_TIMER_INT_SOON_DELAY 5000
 
-// TODO: need to implement external interrupts in SAIL
-#define RVMODEL_MEXT_ADDRESS  0x80000000  /* Address of a memory mapped machine external interrupt generator */
-#define RVMODEL_SET_MEXT_INT(_R1, _R2)        \
-  li _R1, 1;               \
-  li _R2, RVMODEL_MEXT_ADDRESS; \
-  sw _R1, 0(_R2)            ; /* Set MEXT interrupt */ \
+##### Interrupt Latency #####
 
+// Interrupts are taken before the next instruction once pending and enabled.
+#define RVMODEL_INTERRUPT_LATENCY 10
 
-#define RVMODEL_CLR_MEXT_INT(_R1, _R2)        \
-  li _R2, RVMODEL_MEXT_ADDRESS; \
-  sw zero, 0(_R2)            ; /* Clear MEXT interrupt */ \
+##### Machine Interrupts #####
 
+#define CLINT_BASE_ADDRESS   0x02000000
+#define RVMODEL_MSIP_ADDRESS (CLINT_BASE_ADDRESS + 0x0)
 
-#define MSIP_ADDRESS (CLINT_BASE_ADDRESS + 0x0)
+// External interrupts use the real UART and PLIC (QEMU virt layout), as in
+// the CVW configuration: enabling the UART's THRE interrupt with THR empty
+// raises source 10, which the PLIC routes to MEIP (context 0) or SEIP
+// (context 1).
+#define PLIC_BASE_ADDRESS    0x0c000000
+#define PLIC_ENABLE_ADDRESS  0x0c002000
+#define PLIC_THRESH_ADDRESS  0x0c200000
+#define PLIC_CLAIM_ADDRESS   0x0c200004
+#define PLIC_SENABLE_ADDRESS 0x0c002080
+#define PLIC_STHRESH_ADDRESS 0x0c201000
+#define PLIC_SCLAIM_ADDRESS  0x0c201004
 
-#define RVMODEL_SET_MSW_INT(_R1, _R2)        \
-  li _R1, 1;                 \
-  li _R2, MSIP_ADDRESS;              \
-  sw _R1, 0(_R2);
+#define NS16550_BASE_ADDRESS 0x10000000
+#define UART_INT_SRC         10
 
+#define RVMODEL_SET_MEXT_INT(_R1, _R2)          \
+  li _R1, 7;                                     \
+  li _R2, PLIC_BASE_ADDRESS;                     \
+  sw _R1, (4*UART_INT_SRC)(_R2);                 \
+  li _R1, (1 << UART_INT_SRC);                   \
+  li _R2, PLIC_ENABLE_ADDRESS;                   \
+  sw _R1, 0(_R2);                                \
+  li _R2, PLIC_THRESH_ADDRESS;                   \
+  sw zero, 0(_R2);                               \
+  li _R1, 0x02;                                  \
+  li _R2, NS16550_BASE_ADDRESS;                  \
+  sb _R1, 1(_R2);
 
-#define RVMODEL_CLR_MSW_INT(_R1, _R2)        \
-  li _R2, MSIP_ADDRESS;              \
+#define RVMODEL_CLR_MEXT_INT(_R1, _R2)          \
+  li _R2, NS16550_BASE_ADDRESS;                  \
+  sb zero, 1(_R2);                               \
+  li _R2, PLIC_CLAIM_ADDRESS;                    \
+  lw _R1, 0(_R2);                                \
+  sw _R1, 0(_R2);                                \
+  li _R2, PLIC_ENABLE_ADDRESS;                   \
   sw zero, 0(_R2);
-
-
 
 ##### Supervisor Interrupts #####
 
-// TODO: change this when Jordan implements the SAIL SEXT interrupt generator
-#define SAIL_SEXT_ADDRESS  0x80000004  /* Address of a memory mapped supervisor external interrupt generator */
-#define RVMODEL_SET_SEXT_INT(_R1, _R2)        \
-  li _R1, 1;               \
-  li _R2, SAIL_SEXT_ADDRESS; \
-  sw _R1, 0(_R2)            ; /* Set SEXT interrupt */ \
+#define RVMODEL_SET_SEXT_INT(_R1, _R2)          \
+  li _R1, 7;                                     \
+  li _R2, PLIC_BASE_ADDRESS;                     \
+  sw _R1, (4*UART_INT_SRC)(_R2);                 \
+  li _R1, (1 << UART_INT_SRC);                   \
+  li _R2, PLIC_SENABLE_ADDRESS;                  \
+  sw _R1, 0(_R2);                                \
+  li _R2, PLIC_STHRESH_ADDRESS;                  \
+  sw zero, 0(_R2);                               \
+  li _R1, 0x02;                                  \
+  li _R2, NS16550_BASE_ADDRESS;                  \
+  sb _R1, 1(_R2);
 
-
-#define RVMODEL_CLR_SEXT_INT(_R1, _R2)        \
-  li _R2, SAIL_SEXT_ADDRESS; \
-  sw zero, 0(_R2)            ; /* Clear SEXT interrupt */
-
-
-// Sail does not yet support memory-mapped I/O to cause a supervisor software interrupt. Change CLINT_SSIP_ADDRSS to appropriate location when implemented in Sail.
-// #define CLINT_SSIP_ADDRESS (CLINT_BASE_ADDRESS + 0xC000)
-#define CLINT_SSIP_ADDRESS (0x80000000)
-#define RVMODEL_SET_SSW_INT(_R1, _R2)        \
-  li _R1, 1;                 \
-  li _R2, CLINT_SSIP_ADDRESS;              \
-  sw _R1, 0(_R2);
-
-
-#define RVMODEL_CLR_SSW_INT(_R1, _R2)        \
-  li _R2, CLINT_SSIP_ADDRESS;              \
+#define RVMODEL_CLR_SEXT_INT(_R1, _R2)          \
+  li _R2, NS16550_BASE_ADDRESS;                  \
+  sb zero, 1(_R2);                               \
+  li _R2, PLIC_SCLAIM_ADDRESS;                   \
+  lw _R1, 0(_R2);                                \
+  sw _R1, 0(_R2);                                \
+  li _R2, PLIC_SENABLE_ADDRESS;                  \
   sw zero, 0(_R2);
 
-
+// RVMODEL_SET_SSW_INT / RVMODEL_CLR_SSW_INT are intentionally undefined:
+// there is no supervisor software interrupt controller, so the test
+// environment raises and clears SSI through mip.SSIP.
 
 #endif // _RVMODEL_MACROS_H
