@@ -10,6 +10,7 @@ import (
 	"io"
 
 	"github.com/ezekielelvis/rvsim/vmm/devices"
+	"github.com/ezekielelvis/rvsim/vmm/devices/finisher"
 	"github.com/ezekielelvis/rvsim/vmm/devices/plic"
 	"github.com/ezekielelvis/rvsim/vmm/devices/uart"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
@@ -19,9 +20,10 @@ import (
 
 // Memory map (QEMU virt layout, ADR-002).
 const (
-	PLICBase = 0x0c00_0000
-	UARTBase = 0x1000_0000
-	UARTIRQ  = 10 // PLIC source
+	FinisherBase = 0x0010_0000 // SiFive test finisher (power-off/reset)
+	PLICBase     = 0x0c00_0000
+	UARTBase     = 0x1000_0000
+	UARTIRQ      = 10 // PLIC source
 )
 
 // InputSpacing is the virtual time, in steps, between successive host input
@@ -48,8 +50,9 @@ type Config struct {
 
 // Result describes why Run returned.
 type Result struct {
-	Exited   bool   // the guest exited through HTIF
-	ExitCode uint64 // HTIF exit code (tohost >> 1)
+	Exited   bool   // the guest exited through HTIF or the test finisher
+	ExitCode uint64 // HTIF exit code (tohost >> 1) or finisher failure code
+	Reset    bool   // the guest asked the finisher for a reset (with Exited)
 	Steps    uint64
 	Instret  uint64
 }
@@ -73,6 +76,8 @@ type VM struct {
 	plic  *plic.PLIC
 	uart  *uart.UART
 	trace *trace.SpikeWriter
+
+	finished *Result // set by the finisher during an MMIO store
 
 	now       uint64
 	instret   uint64 // retired instructions at the last exit
@@ -100,6 +105,7 @@ func New(cfg Config) (*VM, error) {
 		base, size uint64
 		dev        devices.Device
 	}{
+		{"finisher", FinisherBase, finisher.Size, finisher.New(v.finish)},
 		{"plic", PLICBase, plic.Size, v.plic},
 		{"uart", UARTBase, uart.Size, v.uart},
 	} {
@@ -247,6 +253,9 @@ func (v *VM) Run(maxSteps uint64) (Result, error) {
 			if err := v.m.CompleteMMIO(0, !ok); err != nil {
 				return v.result(false, 0), err
 			}
+			if f := v.finished; f != nil {
+				return v.finishRun(*f)
+			}
 		case machine.ExitWFI:
 			if err := v.idle(exit, limit); err != nil {
 				return v.result(false, 0), err
@@ -288,6 +297,28 @@ func (v *VM) idle(exit machine.Exit, limit uint64) error {
 		return nil
 	}
 	return v.m.AdvanceIdle(min(target, limit) - v.now)
+}
+
+// finish records a finisher request; Run returns once the store completes.
+func (v *VM) finish(a finisher.Action, code uint64) {
+	v.finished = &Result{ExitCode: code, Reset: a == finisher.Reset}
+}
+
+// finishRun retires the store that reached the finisher (MMIO accesses
+// complete by re-execution, ADR-022) and ends the run.
+func (v *VM) finishRun(f Result) (Result, error) {
+	v.finished = nil
+	exit, err := v.m.Run(1)
+	if err != nil {
+		return v.result(false, 0), err
+	}
+	v.now, v.instret = exit.Steps, exit.Instret
+	if err := v.drainTrace(); err != nil {
+		return v.result(false, 0), err
+	}
+	res := v.result(true, f.ExitCode)
+	res.Reset = f.Reset
+	return res, v.flushTrace()
 }
 
 func (v *VM) result(exited bool, code uint64) Result {

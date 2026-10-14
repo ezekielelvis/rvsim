@@ -218,3 +218,36 @@ func TestUARTInterruptReachesTheHartThroughThePLIC(t *testing.T) {
 		t.Fatalf("claim = %d, want %d", id, UARTIRQ)
 	}
 }
+
+func TestFinisherEndsTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		hi, lo    int32 // value = hi<<12 + lo
+		wantCode  uint64
+		wantReset bool
+	}{
+		{"pass", 0x5, 0x555, 0, false},
+		{"fail with code", 0x2a3, 0x333, 42, false},
+		{"reset", 0x7, 0x777, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := newVM(t, nil, Bytes(
+				Lui(T0, FinisherBase>>12),
+				Lui(T1, uint32(tc.hi)),
+				Addi(T1, T1, tc.lo),
+				Sw(T1, T0, 0),
+				Self,
+			))
+			res, err := v.Run(1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !res.Exited || res.ExitCode != tc.wantCode || res.Reset != tc.wantReset {
+				t.Fatalf("result %+v", res)
+			}
+			if res.Instret != 4 {
+				t.Fatalf("instret %d: the finisher store must retire", res.Instret)
+			}
+		})
+	}
+}
