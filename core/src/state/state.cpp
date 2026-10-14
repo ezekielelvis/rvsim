@@ -183,6 +183,7 @@ int snapshot_load(rv_machine& m, const uint8_t* buf, size_t len) {
   }
   Reader r(buf + kHeader, plen);
   visit_core(m, r);
+  m.tlb_gen++;  // the TLB was replaced: drop caches derived from it
   m.exit = rv_exit{};
   m.trace_len = 0;
   return RV_OK;

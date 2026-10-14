@@ -6,6 +6,7 @@
 #include <cstdlib>
 
 #include "cpu/hart.hpp"
+#include "decode/decode.hpp"
 #include "rv.h"
 #include "rv_trace.h"
 
@@ -20,6 +21,14 @@ struct TlbEntry {
   uint16_t asid = 0;
   uint64_t vpn = 0;  // vaddr >> 12
   uint64_t ppn = 0;  // physical page for this vpn
+};
+
+// A decoded instruction cached by the physical address it was fetched from.
+// It is used only if the instruction bits in RAM still match raw, so
+// self-modifying code, host writes and DMA need no invalidation (Phase 12).
+struct DecodeEntry {
+  uint64_t paddr = ~0ull;
+  rv::Insn insn;
 };
 
 struct rv_machine {
@@ -41,8 +50,24 @@ struct rv_machine {
   uint64_t mtimecmp = 0;
   uint64_t mtime_offset = 0;
 
-  // Sv39 TLB: direct-mapped by vpn.
+  // Sv39 TLB: direct-mapped by vpn. tlb_gen increments whenever entries
+  // are flushed, invalidating caches derived from the TLB.
   TlbEntry tlb[256];
+  uint64_t tlb_gen = 0;
+
+  // Performance caches (Phase 12); not state: excluded from hashes and
+  // snapshots, and safe to drop at any time.
+  // The last fetched page's translation, valid for this privilege, satp and
+  // TLB generation.
+  struct FetchCache {
+    uint64_t vpage = ~0ull;
+    uint64_t ppage = 0;
+    uint64_t satp = 0;
+    uint64_t gen = 0;
+    uint8_t priv = 0xff;
+  } fetch;
+  static constexpr size_t kDecodeCacheSize = 1u << 15;  // entries, a power of two
+  DecodeEntry* dcache = nullptr;                        // kDecodeCacheSize entries
 
   // LR/SC reservation: the reserved physical address, or kNoReservation.
   uint64_t reservation = ~0ull;
@@ -89,6 +114,7 @@ struct rv_machine {
 
   ~rv_machine() {
     std::free(ram);
+    delete[] dcache;
     std::free(trace);
   }
 

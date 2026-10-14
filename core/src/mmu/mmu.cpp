@@ -149,6 +149,7 @@ Translation translate_debug(const rv_machine* m, uint64_t vaddr, Access a) {
 }
 
 void tlb_flush(rv_machine* m, bool has_vaddr, uint64_t vaddr, bool has_asid, uint64_t asid) {
+  m->tlb_gen++;  // invalidates the fetch fast path
   const uint64_t vpn = vaddr >> kPageShift;
   for (TlbEntry& t : m->tlb) {
     if (!t.valid) continue;

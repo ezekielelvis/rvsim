@@ -63,7 +63,8 @@ int rv_create(const rv_config* cfg, rv_machine** out) {
   // calloc lets the OS hand out lazily-zeroed pages, so large RAM is cheap
   // until touched.
   m->ram = static_cast<uint8_t*>(std::calloc(1, cfg->ram_size));
-  if (m->ram == nullptr) {
+  m->dcache = new (std::nothrow) DecodeEntry[rv_machine::kDecodeCacheSize];
+  if (m->ram == nullptr || m->dcache == nullptr) {
     delete m;
     return RV_E_NOMEM;
   }

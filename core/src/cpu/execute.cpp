@@ -199,7 +199,8 @@ Exception mmio_access(rv_machine* m, uint64_t addr, uint64_t vaddr, size_t size,
   return raise(kMmioExit, 0);
 }
 
-constexpr uint64_t kPageSize = 4096;
+constexpr unsigned kPageShift = 12;
+constexpr uint64_t kPageSize = 1ull << kPageShift;
 
 // Translates an access of `size` bytes at vaddr. An access that crosses a
 // page boundary (possible only with RV_CFG_MISALIGNED_OK) translates both
@@ -707,17 +708,38 @@ Step step(rv_machine* m) {
   // at the instruction (Priv §3.1.16).
   // Each parcel is translated on its own, so an instruction that straddles
   // a page boundary can fault on its second page (Priv §4.3.2).
-  const Translation t0 = translate(m, h.pc, Access::Fetch);
-  if (!t0.ok()) return take_trap<kTrace>(m, raise(t0.cause, h.pc), rec);
-  if (!m->ram_contains(t0.paddr, 2)) return take_trap<kTrace>(m, raise(kCauseFetchAccess, h.pc), rec);
+  //
+  // Fast path: the last fetched page's translation, reused while privilege,
+  // satp and the TLB (generation) are unchanged; it is a cache of the TLB.
+  const uint64_t vpage = h.pc >> kPageShift;
+  auto& fc = m->fetch;
+  uint64_t pa;
+  if (vpage == fc.vpage && h.priv == fc.priv && h.csr.satp == fc.satp && fc.gen == m->tlb_gen) {
+    pa = (fc.ppage << kPageShift) | (h.pc & (kPageSize - 1));
+  } else {
+    const Translation t0 = translate(m, h.pc, Access::Fetch);
+    if (!t0.ok()) return take_trap<kTrace>(m, raise(t0.cause, h.pc), rec);
+    if (!m->ram_contains(t0.paddr, 2)) return take_trap<kTrace>(m, raise(kCauseFetchAccess, h.pc), rec);
+    pa = t0.paddr;
+    if (m->ram_contains(pa & ~(kPageSize - 1), kPageSize)) {
+      fc = rv_machine::FetchCache{vpage, pa >> kPageShift, h.csr.satp, m->tlb_gen, h.priv};
+    }
+  }
   uint16_t lo;
-  std::memcpy(&lo, m->ram_ptr(t0.paddr), 2);
-  Insn d;
+  std::memcpy(&lo, m->ram_ptr(pa), 2);
+  // Decoded-instruction cache, keyed by physical address and checked
+  // against the instruction bits now in RAM.
+  DecodeEntry& ce = m->dcache[(pa >> 1) & (rv_machine::kDecodeCacheSize - 1)];
+  Insn uncached;
+  const Insn* dp = &ce.insn;
   if ((lo & 3) != 3) {
-    d = decode16(lo);
+    if (ce.paddr != pa || ce.insn.len != 2 || ce.insn.raw != lo) {
+      ce.insn = decode16(lo);
+      ce.paddr = pa;
+    }
   } else {
     const uint64_t pc2 = h.pc + 2;
-    uint64_t pa2 = t0.paddr + 2;
+    uint64_t pa2 = pa + 2;
     if ((pc2 & (kPageSize - 1)) == 0) {
       const Translation t1 = translate(m, pc2, Access::Fetch);
       if (!t1.ok()) return take_trap<kTrace>(m, raise(t1.cause, pc2), rec);
@@ -726,8 +748,18 @@ Step step(rv_machine* m) {
     if (!m->ram_contains(pa2, 2)) return take_trap<kTrace>(m, raise(kCauseFetchAccess, pc2), rec);
     uint16_t hi;
     std::memcpy(&hi, m->ram_ptr(pa2), 2);
-    d = decode32(static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16));
+    const uint32_t raw = static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16);
+    if (pa2 != pa + 2) {
+      // An instruction straddling pages is never cached: its second half
+      // may map elsewhere next time.
+      uncached = decode32(raw);
+      dp = &uncached;
+    } else if (ce.paddr != pa || ce.insn.len != 4 || ce.insn.raw != raw) {
+      ce.insn = decode32(raw);
+      ce.paddr = pa;
+    }
   }
+  const Insn& d = *dp;
   if constexpr (kTrace) {
     rec.insn = d.raw;
     rec.insn_len = d.len;
@@ -819,6 +851,7 @@ void reset_hart(rv_machine* m) {
   m->in_wfi = false;
   m->mmio = rv_machine::Mmio{};
   for (TlbEntry& t : m->tlb) t = TlbEntry{};
+  m->tlb_gen++;
   m->mtimecmp = 0;
   m->mtime_offset = 0;
   m->reservation = kNoReservation;
