@@ -74,8 +74,13 @@ typedef enum {
   RV_EXIT_BREAKPOINT = 5, /* addr = matched address, value = breakpoint id */
   RV_EXIT_HALT       = 6, /* HTIF write to tohost; value = payload */
   RV_EXIT_TRACE_FULL = 7, /* drain with rv_trace_peek/rv_trace_consume, then rv_run */
-  RV_EXIT_ERROR      = 8  /* value = detail code; machine poisoned */
+  RV_EXIT_ERROR      = 8  /* value = rv_error_detail; machine poisoned */
 } rv_exit_reason;
+
+/* RV_EXIT_ERROR details. */
+typedef enum {
+  RV_ERROR_MMIO_REPLAY = 1 /* finishing an MMIO access reached a different access */
+} rv_error_detail;
 
 typedef struct {
   uint32_t reason;      /* rv_exit_reason */

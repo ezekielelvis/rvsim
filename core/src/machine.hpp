@@ -43,8 +43,20 @@ struct rv_machine {
   size_t trace_cap = 0;  // in records
   size_t trace_len = 0;
 
+  // An MMIO access the VMM must perform (ADR-022). `pending`: rv_run exited
+  // with it; `completed`: rv_complete_mmio supplied the result, and the
+  // instruction is re-executed on the next rv_run to retire with it.
+  struct Mmio {
+    bool pending = false;
+    bool completed = false;
+    bool is_store = false;
+    bool fault = false;
+    uint8_t size = 0;
+    uint64_t addr = 0;
+    uint64_t value = 0;  // store data, or the completed load result
+  } mmio;
+
   // Run-loop state.
-  bool mmio_pending = false;
   bool in_wfi = false;
   bool poisoned = false;
   bool htif_halt = false;  // a store made tohost non-zero

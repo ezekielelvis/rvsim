@@ -53,10 +53,14 @@ TEST_F(Cpu, StoresWriteOnlyTheirWidth) {
   EXPECT_EQ(mem<uint64_t>(kData), 0x11223344'55667788u);
 }
 
+// Outside RAM and the CLINT, accesses go to the VMM (ADR-022), which reports
+// a missing device by completing them with a fault.
 TEST_F(Cpu, LoadOutsideRamIsAccessFault) {
   program({load(3, 3, 1, 0)});
   set_x(1, 0x1000'0000);
   set_x(3, 7);
+  ASSERT_EQ(run(1).reason, RV_EXIT_MMIO_READ);
+  ASSERT_EQ(rv_complete_mmio(m, 0, 1), RV_OK);
   run(1);
   expect_trap(5, 0x1000'0000, kRamBase);
   EXPECT_EQ(x(3), 7u);  // rd unchanged
@@ -88,6 +92,8 @@ TEST_F(CpuMisalignedOK, AccessStraddlingEndOfRamIsAccessFault) {
 TEST_F(Cpu, StoreOutsideRamIsAccessFault) {
   program({store(3, 2, 1, 0)});
   set_x(1, 0x1000);
+  ASSERT_EQ(run(1).reason, RV_EXIT_MMIO_WRITE);
+  ASSERT_EQ(rv_complete_mmio(m, 0, 1), RV_OK);
   run(1);
   expect_trap(7, 0x1000, kRamBase);
 }

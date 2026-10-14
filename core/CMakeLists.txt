@@ -67,6 +67,7 @@ if(RVSIM_BUILD_TESTS)
     tests/decode_test.cpp
     tests/header_c_test.c
     tests/memory_test.cpp
+    tests/mmio_test.cpp
     tests/muldiv_test.cpp
     tests/privileged_test.cpp
     tests/system_test.cpp

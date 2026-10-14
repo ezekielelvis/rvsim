@@ -22,17 +22,20 @@ __extension__ using i128 = __int128;
 __extension__ using u128 = unsigned __int128;
 
 constexpr uint64_t kNoException = ~0ull;
+// Not an architectural exception: the access needs the VMM (ADR-022).
+constexpr uint64_t kMmioExit = ~1ull;
 
 struct Exception {
   uint64_t cause = kNoException;
   uint64_t tval = 0;
   bool raised() const { return cause != kNoException; }
+  bool mmio_exit() const { return cause == kMmioExit; }
 };
 
 constexpr Exception ok() { return {}; }
 constexpr Exception raise(uint64_t cause, uint64_t tval) { return {cause, tval}; }
 
-enum class Step { Retired, Trapped, Halt };
+enum class Step { Retired, Trapped, Halt, MmioExit, Error };
 
 constexpr int64_t sext32(uint64_t v) { return static_cast<int32_t>(static_cast<uint32_t>(v)); }
 
@@ -168,6 +171,32 @@ void bump_counters(Csrs& c) {
   }
 }
 
+// An access outside RAM and the CLINT goes to the VMM (ADR-022). The first
+// time, it records the request and stops the instruction before any state
+// changes; once rv_complete_mmio has supplied the result, re-executing the
+// instruction reaches the same access and consumes it. MMIO accesses must be
+// naturally aligned; other sizes and atomics raise access faults.
+Exception mmio_access(rv_machine* m, uint64_t addr, size_t size, bool is_store, uint64_t& value) {
+  auto& io = m->mmio;
+  if ((addr & (size - 1)) != 0) return raise(is_store ? kCauseStoreAccess : kCauseLoadAccess, addr);
+  if (io.completed) {
+    if (io.addr != addr || io.size != size || io.is_store != is_store) {
+      return raise(kMmioExit, 1);  // re-execution diverged: an internal error
+    }
+    io.pending = io.completed = false;
+    if (io.fault) return raise(is_store ? kCauseStoreAccess : kCauseLoadAccess, addr);
+    if (!is_store) value = io.value;
+    return ok();
+  }
+  io.pending = true;
+  io.is_store = is_store;
+  io.fault = false;
+  io.size = static_cast<uint8_t>(size);
+  io.addr = addr;
+  io.value = is_store ? value : 0;
+  return raise(kMmioExit, 0);
+}
+
 template <typename T>
 Exception load(rv_machine* m, uint64_t addr, T& out) {
   // Misaligned accesses trap unless configured otherwise (ADR-004, Unpriv §2.6).
@@ -178,12 +207,14 @@ Exception load(rv_machine* m, uint64_t addr, T& out) {
     std::memcpy(&out, m->ram_ptr(addr), sizeof(T));
     return ok();
   }
-  uint64_t v;
-  if (m->clint_contains(addr, sizeof(T)) && clint_load(m, addr, sizeof(T), v)) {
-    out = static_cast<T>(v);
-    return ok();
+  uint64_t v = 0;
+  if (m->clint_contains(addr, sizeof(T))) {
+    if (!clint_load(m, addr, sizeof(T), v)) return raise(kCauseLoadAccess, addr);
+  } else if (Exception e = mmio_access(m, addr, sizeof(T), false, v); e.raised()) {
+    return e;
   }
-  return raise(kCauseLoadAccess, addr);
+  out = static_cast<T>(v);
+  return ok();
 }
 
 // Writes RAM that has already been checked, then applies HTIF (ADR-013): a
@@ -211,10 +242,11 @@ Exception store(rv_machine* m, uint64_t addr, T value) {
     store_ram(m, addr, value);
     return ok();
   }
-  if (m->clint_contains(addr, sizeof(T)) && clint_store(m, addr, sizeof(T), static_cast<uint64_t>(value))) {
-    return ok();
+  uint64_t v = static_cast<uint64_t>(value);
+  if (m->clint_contains(addr, sizeof(T))) {
+    return clint_store(m, addr, sizeof(T), v) ? ok() : raise(kCauseStoreAccess, addr);
   }
-  return raise(kCauseStoreAccess, addr);
+  return mmio_access(m, addr, sizeof(T), true, v);
 }
 
 // Atomics require natural alignment regardless of RV_CFG_MISALIGNED_OK, and
@@ -605,9 +637,12 @@ Step step(rv_machine* m) {
     rec.priv = h.priv;
   }
 
-  // Pending interrupts are taken between instructions (Priv §3.1.9).
-  if (const uint64_t irq = pending_interrupt(m); irq != 0) {
-    return take_trap<kTrace>(m, raise(irq, 0), rec);
+  // Pending interrupts are taken between instructions (Priv §3.1.9), but not
+  // while an instruction is finishing an MMIO access it already started.
+  if (!m->mmio.completed) {
+    if (const uint64_t irq = pending_interrupt(m); irq != 0) {
+      return take_trap<kTrace>(m, raise(irq, 0), rec);
+    }
   }
 
   // Fetch one parcel, then a second if the first says the instruction is 32
@@ -634,7 +669,10 @@ Step step(rv_machine* m) {
   }
 
   Executor<kTrace> ex(m, d, rec);
-  if (Exception e = ex.execute(); e.raised()) return take_trap<kTrace>(m, e, rec);
+  if (Exception e = ex.execute(); e.raised()) {
+    if (e.mmio_exit()) return e.tval == 0 ? Step::MmioExit : Step::Error;
+    return take_trap<kTrace>(m, e, rec);
+  }
 
   h.pc = ex.next_pc();
   bump_counters(h.csr);
@@ -660,7 +698,13 @@ rv_exit_reason loop(rv_machine* m, uint64_t end) {
     if constexpr (kTrace) {
       if (m->trace_len == m->trace_cap) return RV_EXIT_TRACE_FULL;
     }
-    if (step<kTrace>(m) == Step::Halt) return RV_EXIT_HALT;
+    switch (step<kTrace>(m)) {
+      case Step::Halt: return RV_EXIT_HALT;
+      case Step::MmioExit: return m->mmio.is_store ? RV_EXIT_MMIO_WRITE : RV_EXIT_MMIO_READ;
+      case Step::Error: return RV_EXIT_ERROR;
+      case Step::Retired:
+      case Step::Trapped: break;
+    }
   }
   return RV_EXIT_BUDGET;
 }
@@ -676,6 +720,7 @@ void reset_hart(rv_machine* m) {
   m->instret = 0;
   m->htif_halt = false;
   m->in_wfi = false;
+  m->mmio = rv_machine::Mmio{};
   m->mtimecmp = 0;
   m->mtime_offset = 0;
   m->reservation = kNoReservation;
@@ -691,10 +736,25 @@ void run(rv_machine* m, uint64_t max_steps) {
   m->exit.steps = m->steps;
   m->exit.instret = m->instret;
   m->exit.timer_step = timer_step(m);
-  if (reason == RV_EXIT_HALT) {
-    m->htif_halt = false;
-    m->exit.addr = m->cfg.htif_tohost;
-    std::memcpy(&m->exit.value, m->ram_ptr(m->cfg.htif_tohost), 8);
+  switch (reason) {
+    case RV_EXIT_HALT:
+      m->htif_halt = false;
+      m->exit.addr = m->cfg.htif_tohost;
+      std::memcpy(&m->exit.value, m->ram_ptr(m->cfg.htif_tohost), 8);
+      break;
+    case RV_EXIT_MMIO_READ:
+    case RV_EXIT_MMIO_WRITE:
+      m->exit.addr = m->mmio.addr;
+      m->exit.size = m->mmio.size;
+      m->exit.value = m->mmio.is_store ? m->mmio.value : 0;
+      break;
+    case RV_EXIT_ERROR:
+      // Re-executing an instruction to finish its MMIO access reached a
+      // different access: a core invariant broke. The machine is unusable.
+      m->poisoned = true;
+      m->exit.value = RV_ERROR_MMIO_REPLAY;
+      break;
+    default: break;
   }
 }
 

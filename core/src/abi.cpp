@@ -39,7 +39,7 @@ void reset_state(rv_machine* m) {
   rv::reset_hart(m);
   m->irq_lines = 0;
   m->irq_suppress = 0;
-  m->mmio_pending = false;
+  m->mmio = rv_machine::Mmio{};
   m->in_wfi = false;
   m->poisoned = false;
   m->exit = rv_exit{};
@@ -83,16 +83,19 @@ const rv_exit* rv_exit_info(const rv_machine* m) { return m == nullptr ? nullptr
 int rv_run(rv_machine* m, uint64_t max_steps) {
   if (m == nullptr) return RV_E_INVAL;
   if (m->poisoned) return RV_E_POISONED;
-  if (m->mmio_pending) return RV_E_STATE;
+  if (m->mmio.pending && !m->mmio.completed) return RV_E_STATE;
   rv::run(m, max_steps);
   return RV_OK;
 }
 
-int rv_complete_mmio(rv_machine* m, uint64_t /*read_value*/, int /*access_fault*/) {
+int rv_complete_mmio(rv_machine* m, uint64_t read_value, int access_fault) {
   if (m == nullptr) return RV_E_INVAL;
   if (m->poisoned) return RV_E_POISONED;
-  if (!m->mmio_pending) return RV_E_STATE;
-  return RV_E_UNSUPPORTED;
+  if (!m->mmio.pending || m->mmio.completed) return RV_E_STATE;
+  m->mmio.completed = true;
+  m->mmio.fault = access_fault != 0;
+  if (!m->mmio.is_store) m->mmio.value = read_value;
+  return RV_OK;
 }
 
 int rv_advance_idle(rv_machine* m, uint64_t steps) {
