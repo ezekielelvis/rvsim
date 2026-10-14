@@ -1,4 +1,4 @@
-package baremetal
+package vm
 
 import (
 	"bytes"
@@ -9,18 +9,18 @@ import (
 	"github.com/ezekielelvis/rvsim/vmm/machine"
 )
 
-func newHTIFMachine(t *testing.T) (*machine.Machine, machine.Config) {
+func newHTIFVM(t *testing.T, console *bytes.Buffer) (*VM, machine.Config) {
 	t.Helper()
 	cfg := machine.DefaultConfig()
 	cfg.RAMSize = 1 << 20
 	cfg.HTIFToHost = 0x8000_1000
 	cfg.HTIFFromHost = 0x8000_1040
-	m, err := machine.New(cfg)
+	v, err := New(Config{Machine: cfg, Console: console, HTIF: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(m.Close)
-	return m, cfg
+	t.Cleanup(v.Close)
+	return v, cfg
 }
 
 func readU64(t *testing.T, m *machine.Machine, addr uint64) uint64 {
@@ -50,12 +50,13 @@ func TestHandleHTIF(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, cfg := newHTIFMachine(t)
-			if err := writeU64(m, cfg.HTIFToHost, tt.cmd); err != nil {
+			var console bytes.Buffer
+			v, cfg := newHTIFVM(t, &console)
+			m := v.Machine()
+			if err := v.writeU64(cfg.HTIFToHost, tt.cmd); err != nil {
 				t.Fatal(err)
 			}
-			var console bytes.Buffer
-			done, code, err := handleHTIF(m, cfg, tt.cmd, &console)
+			done, code, err := v.handleHTIF(tt.cmd)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
