@@ -308,6 +308,8 @@ the expected results into the test.
   Svbare and a standard M-mode (`STANDARD_SM_SUPPORTED`). The interrupt
   suites (`InterruptsSm/S/U`) are excluded until the CLINT/PLIC interrupt
   hooks exist in Phase 4. Sdtrig stays excluded, as in ACT4's defaults.
+- **Phase 4:** the interrupt suites run, using the real UART and PLIC
+  (ADR-024).
 - **Pinned versions:** ACT4 commit `d40cf3d` (2026-09-28) and Sail 0.14.1,
   the version that commit's own CI uses. Its README names 0.15, released
   2026-10-06.
@@ -459,3 +461,87 @@ The fix: after every core build, CMake writes `vmm/machine/zz_corehash.go`
 `init()`, which puts the hash into the compiled package so dependents relink.
 `rvsim version` prints it as the core build ID. CI builds from scratch, so
 earlier pushed results were not affected.
+
+---
+
+## ADR-022: MMIO exits complete by re-executing the instruction
+
+**Status:** Accepted (Phase 4)
+
+A load or store outside RAM and the CLINT stops the instruction before it
+changes any state. `rv_run` returns `RV_EXIT_MMIO_READ`/`WRITE` with the
+address, size and (for writes) the value. After `rv_complete_mmio(value,
+fault)`, the next `rv_run` re-executes the same instruction. When it reaches
+the same access it takes the supplied result (or raises a load/store access
+fault) and retires.
+
+This is safe because no load or store has side effects before its memory
+access. It also keeps the executor free of a separate "finish this
+instruction" path, so the trace record, counters and step accounting are
+written once, at retirement. Further rules:
+
+- Pending interrupts are not taken between the exit and the instruction
+  retiring.
+- MMIO accesses must be naturally aligned, or they raise access faults,
+  even with `RV_CFG_MISALIGNED_OK`. Atomics and instruction fetches outside
+  RAM also fault without exiting.
+- If re-execution ever reached a different access, the core would exit with
+  `RV_EXIT_ERROR`/`RV_ERROR_MMIO_REPLAY` and refuse to run further.
+- The VMM completes an access to an address with no device as an access fault.
+
+---
+
+## ADR-023: Host input reaches the guest only through scheduled events
+
+**Status:** Accepted (Phase 4)
+
+UART input (stdin, or `vm.ScheduleInput` in tests and replays) is queued by
+the run loop and delivered one byte per scheduler event, `InputSpacing`
+(10,000) steps apart. Two consequences:
+
+- **Pacing:** a burst of host input arrives at a rate the guest can drain,
+  rather than all at once into a 16-byte FIFO.
+- **Flow control:** while the guest's receive FIFO is full, the next byte
+  waits for the next slot instead of being lost to an overrun. Real UARTs
+  have no flow control; this is a property of the virtual "host side",
+  documented as such.
+
+A reader goroutine only sends bytes over a channel. The run loop alone
+decides when they are delivered: at the current virtual time if the hart is
+running, or while the hart idles in WFI with nothing else to wake it, at
+which point virtual time does not move while the loop waits. Phase 8 records
+these delivery steps for replay.
+
+---
+
+## ADR-024: Device models
+
+**Status:** Accepted (Phase 4)
+
+**PLIC** (`riscv,plic0`, QEMU virt layout):
+- 32 sources (ID 0 reserved), with 3-bit priorities.
+- Hart 0 has two contexts: context 0 (M-mode) drives MEIP, context 1 (S-mode)
+  drives SEIP.
+- Sources have level-triggered gateways. A claim takes the highest priority
+  above the threshold, ties going to the lowest ID.
+- A completion for a source not enabled in that context is ignored
+  (PLIC spec §9).
+- Only 32-bit accesses are defined.
+- The PLIC tells the core about MEIP/SEIP only when they change.
+
+**UART** (16550A, `ns16550a`, byte registers, PLIC source 10):
+- Transmission is instantaneous. A THRE interrupt is raised again after each
+  transmit, cleared by reading IIR or writing THR, as in QEMU.
+- With the FIFO enabled, received data below the trigger level reports
+  immediately as a character timeout, instead of after four character times.
+  Drivers treat the two the same way, and this keeps the device free of
+  timers.
+- Modem status reads as connected (DCD, DSR, CTS). Loopback mode is supported.
+
+The run loop lives in a new `vmm/vm` package, keeping `vmm/machine` a thin
+cgo wrapper that only it imports.
+
+**ACT4 interrupt suites:** the `InterruptsSm`/`InterruptsS` tests raise
+external interrupts through these real devices. The rvmodel macros enable the
+UART's THRE interrupt, which goes through the PLIC, following ACT4's CVW
+configuration. Supervisor software interrupts go through `mip.SSIP`.
