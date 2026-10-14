@@ -78,6 +78,7 @@ type state struct {
 type UART struct {
 	s       state
 	out     io.Writer
+	txHook  func(byte) (byte, bool)
 	irq     devices.IRQLine
 	irqHigh bool
 	txBuf   [1]byte
@@ -89,6 +90,10 @@ func New(out io.Writer, irq devices.IRQLine) *UART {
 	u.Reset()
 	return u
 }
+
+// SetTxHook installs f to see each transmitted byte before it is output:
+// it may replace it, or drop it by returning false (fault injection).
+func (u *UART) SetTxHook(f func(b byte) (byte, bool)) { u.txHook = f }
 
 // SetOutput redirects transmitted bytes to out.
 func (u *UART) SetOutput(out io.Writer) { u.out = out }
@@ -214,8 +219,14 @@ func (u *UART) transmit(b byte) {
 	if u.s.MCR&mcrLoop != 0 {
 		u.Receive(b)
 	} else if u.out != nil {
-		u.txBuf[0] = b
-		_, _ = u.out.Write(u.txBuf[:])
+		keep := true
+		if u.txHook != nil {
+			b, keep = u.txHook(b)
+		}
+		if keep {
+			u.txBuf[0] = b
+			_, _ = u.out.Write(u.txBuf[:])
+		}
 	}
 	// THR is empty again immediately; a THRE interrupt follows if enabled.
 	u.s.ThrPending = u.s.IER&ierTHRE != 0

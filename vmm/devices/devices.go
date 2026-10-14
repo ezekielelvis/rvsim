@@ -60,15 +60,24 @@ func (b *Bus) Map(name string, base, size uint64, d Device) error {
 // Lookup finds the device for an access of size bytes at addr. The whole
 // access must fall inside one region.
 func (b *Bus) Lookup(addr uint64, size int) (Device, uint64, bool) {
-	i := sort.Search(len(b.regions), func(i int) bool { return b.regions[i].Base+b.regions[i].Size > addr })
-	if i == len(b.regions) {
-		return nil, 0, false
-	}
-	r := &b.regions[i]
-	if addr < r.Base || addr-r.Base > r.Size-uint64(size) || uint64(size) > r.Size {
+	r := b.Region(addr, size)
+	if r == nil {
 		return nil, 0, false
 	}
 	return r.Device, addr - r.Base, true
+}
+
+// Region returns the region an access of size bytes at addr falls in, or nil.
+func (b *Bus) Region(addr uint64, size int) *Region {
+	i := sort.Search(len(b.regions), func(i int) bool { return b.regions[i].Base+b.regions[i].Size > addr })
+	if i == len(b.regions) {
+		return nil
+	}
+	r := &b.regions[i]
+	if addr < r.Base || addr-r.Base > r.Size-uint64(size) || uint64(size) > r.Size {
+		return nil
+	}
+	return r
 }
 
 // Regions returns the mappings, sorted by base address.

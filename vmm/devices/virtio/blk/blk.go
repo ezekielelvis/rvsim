@@ -68,7 +68,16 @@ type Config struct {
 	ReadOnly bool
 	Latency  uint64 // steps from notification to completion; 0 means DefaultLatency
 	Serial   string // returned by GET_ID, at most 20 bytes
+	// Fault, if set, is asked about each request (fault injection): fail it
+	// with an I/O error, or, for a read, XOR byte offset of its data with xor.
+	Fault func(typ uint32) (fail, corrupt bool, offset uint64, xor uint8)
 }
+
+// Request types, for Config.Fault.
+const (
+	ReqIn  = reqIn
+	ReqOut = reqOut
+)
 
 // Block is a virtio-blk device on a virtio-mmio transport. It implements
 // devices.Device.
@@ -82,6 +91,7 @@ type Block struct {
 	pending bool   // a completion event is scheduled
 	gen     uint64 // incremented on reset; stale events carry an old value
 
+	mem   virtio.Memory
 	chain virtio.Chain
 	hdr   [16]byte
 	buf   []byte
@@ -102,6 +112,7 @@ func New(cfg Config, mem virtio.Memory, irq devices.IRQLine, s *sched.Scheduler,
 		cfg.Latency = DefaultLatency
 	}
 	b := &Block{cfg: cfg, sched: s, now: now, buf: make([]byte, chunk)}
+	b.mem = mem
 	b.MMIO = virtio.NewMMIO(backend{b}, mem, irq)
 	b.self = s.Register("virtio-blk", b)
 	return b, nil
@@ -200,21 +211,32 @@ func (b *Block) handle(c *virtio.Chain) (uint32, error) {
 	var written uint64
 	status := byte(statusOK)
 	var err error
-	switch typ {
-	case reqIn:
+	var fail, corrupt bool
+	var corruptOff uint64
+	var corruptXor uint8
+	if b.cfg.Fault != nil {
+		fail, corrupt, corruptOff, corruptXor = b.cfg.Fault(typ)
+	}
+	switch {
+	case fail:
+		err = errors.New("injected fault")
+	case typ == reqIn:
 		if err = b.checkRange(sector, in); err == nil {
 			err = b.copyIn(c, sector*SectorSize, in)
 			written = in
 		}
-	case reqOut:
+		if err == nil && corrupt && corruptOff < in {
+			err = b.xorAt(c, corruptOff, corruptXor)
+		}
+	case typ == reqOut:
 		if b.cfg.ReadOnly {
 			err = errors.New("read-only")
 		} else if err = b.checkRange(sector, out); err == nil {
 			err = b.copyOut(c, sector*SectorSize, out)
 		}
-	case reqFlush:
+	case typ == reqFlush:
 		err = b.cfg.Disk.Sync()
-	case reqGetID:
+	case typ == reqGetID:
 		var id [idLen]byte
 		copy(id[:], b.cfg.Serial)
 		written = min(in, idLen)
@@ -238,6 +260,23 @@ func (b *Block) handle(c *virtio.Chain) (uint32, error) {
 func (b *Block) checkRange(sector, n uint64) error {
 	if n%SectorSize != 0 || sector > b.cfg.Size/SectorSize || n > b.cfg.Size-sector*SectorSize {
 		return fmt.Errorf("sectors [%d, +%d bytes) outside a %d-byte disk", sector, n, b.cfg.Size)
+	}
+	return nil
+}
+
+// xorAt XORs one byte of the chain's writable data (an injected fault).
+func (b *Block) xorAt(c *virtio.Chain, off uint64, x uint8) error {
+	// Read the byte back from the guest buffer it was written to.
+	for _, s := range c.Writable {
+		if off < uint64(s.Len) {
+			var v [1]byte
+			if err := b.mem.ReadPhys(s.Addr+off, v[:]); err != nil {
+				return err
+			}
+			v[0] ^= x
+			return b.mem.WritePhys(s.Addr+off, v[:])
+		}
+		off -= uint64(s.Len)
 	}
 	return nil
 }
