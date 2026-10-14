@@ -4,7 +4,7 @@ $schema: config_schema.json#
 kind: architecture configuration
 type: fully configured
 name: rvsim-rv64imac
-description: rvsim (RV64IMAC, Zicsr, Zifencei, Zicntr, M/S/U modes, Bare addressing until Sv39 in Phase 5).
+description: rvsim (RV64IMAC, Zicsr, Zifencei, Zicntr, M/S/U modes, Sv39 with Svade/Svadu).
 implemented_extensions:
   - { name: I, version: "= 2.1" }
   - { name: M, version: "= 2.0" }
@@ -21,6 +21,9 @@ implemented_extensions:
   - { name: U, version: "= 1.0.0" }
   - { name: Zicntr, version: "= 2.0" }
   - { name: Svbare, version: "= 1.0.0" }
+  - { name: Sv39, version: "= 1.0" }
+  - { name: Svade, version: "= 1.0.0" }
+  - { name: Svadu, version: "= 1.0.0" }
 
 params:
   # A params
@@ -41,9 +44,9 @@ params:
   U_MODE_ENDIANNESS: little
   UXLEN: [64]
   TRAP_ON_ECALL_FROM_U: true
-  # S params (Bare addressing only until Sv39 in Phase 5)
+  # S params
   MUTABLE_MISA_S: false
-  ASID_WIDTH: 0
+  ASID_WIDTH: 16
   S_MODE_ENDIANNESS: little
   SXLEN: [64]
   REPORT_VA_IN_STVAL_ON_BREAKPOINT: true
@@ -59,7 +62,6 @@ params:
   STVEC_MODES: [0, 1]
   STVEC_BASE_ALIGNMENT_VECTORED: 4
   SATP_MODE_BARE: true
-  TRAP_ON_SFENCE_VMA_WHEN_SATP_MODE_IS_READ_ONLY: false  # ADR-016: permitted when TVM=0
   REPORT_VA_IN_STVAL_ON_LOAD_PAGE_FAULT: true
   REPORT_VA_IN_STVAL_ON_STORE_AMO_PAGE_FAULT: true
   REPORT_VA_IN_STVAL_ON_INSTRUCTION_PAGE_FAULT: true
@@ -97,7 +99,7 @@ params:
   MTVAL_WIDTH: 64
   CONFIG_PTR_ADDRESS: 0
   PMA_GRANULARITY: 3
-  PHYS_ADDR_WIDTH: 57
+  PHYS_ADDR_WIDTH: 56
   M_MODE_ENDIANNESS: little
   MISA_CSR_IMPLEMENTED: true
   MTVEC_ACCESS: rw
