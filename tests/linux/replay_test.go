@@ -2,6 +2,7 @@ package linux
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"os"
@@ -144,4 +145,12 @@ func copyFile(t *testing.T, src, dst string) {
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func sizeOf(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return "?"
+	}
+	return fmt.Sprintf("%.1f MiB", float64(st.Size())/(1<<20))
 }
