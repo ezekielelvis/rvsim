@@ -4,7 +4,7 @@ $schema: config_schema.json#
 kind: architecture configuration
 type: fully configured
 name: rvsim-rv64imac
-description: rvsim (RV64IMAC, Zicsr, Zifencei, M and U modes). Unprivileged tests only until Phase 3.
+description: rvsim (RV64IMAC, Zicsr, Zifencei, Zicntr, M/S/U modes, Bare addressing until Sv39 in Phase 5).
 implemented_extensions:
   - { name: I, version: "= 2.1" }
   - { name: M, version: "= 2.0" }
@@ -17,6 +17,10 @@ implemented_extensions:
   - { name: Zalrsc, version: "= 1.0.0" }
   - { name: Zca, version: "= 1.0.0" }
   - { name: Sm, version: "= 1.12.0" }
+  - { name: S, version: "= 1.12.0" }
+  - { name: U, version: "= 1.0.0" }
+  - { name: Zicntr, version: "= 2.0" }
+  - { name: Svbare, version: "= 1.0.0" }
 
 params:
   # A params
@@ -30,6 +34,38 @@ params:
   MUTABLE_MISA_M: false
   # C params
   MUTABLE_MISA_C: false
+  # Zicntr params
+  TIME_CSR_IMPLEMENTED: true
+  # U params
+  MUTABLE_MISA_U: false
+  U_MODE_ENDIANNESS: little
+  UXLEN: [64]
+  TRAP_ON_ECALL_FROM_U: true
+  # S params (Bare addressing only until Sv39 in Phase 5)
+  MUTABLE_MISA_S: false
+  ASID_WIDTH: 0
+  S_MODE_ENDIANNESS: little
+  SXLEN: [64]
+  REPORT_VA_IN_STVAL_ON_BREAKPOINT: true
+  REPORT_VA_IN_STVAL_ON_LOAD_MISALIGNED: true
+  REPORT_VA_IN_STVAL_ON_STORE_AMO_MISALIGNED: true
+  REPORT_VA_IN_STVAL_ON_INSTRUCTION_MISALIGNED: true
+  REPORT_VA_IN_STVAL_ON_LOAD_ACCESS_FAULT: true
+  REPORT_VA_IN_STVAL_ON_STORE_AMO_ACCESS_FAULT: true
+  REPORT_VA_IN_STVAL_ON_INSTRUCTION_ACCESS_FAULT: true
+  REPORT_ENCODING_IN_STVAL_ON_ILLEGAL_INSTRUCTION: true
+  STVAL_WIDTH: 64
+  SCOUNTENABLE_EN: [true, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+  STVEC_MODES: [0, 1]
+  STVEC_BASE_ALIGNMENT_VECTORED: 4
+  SATP_MODE_BARE: true
+  TRAP_ON_SFENCE_VMA_WHEN_SATP_MODE_IS_READ_ONLY: false  # ADR-016: permitted when TVM=0
+  REPORT_VA_IN_STVAL_ON_LOAD_PAGE_FAULT: true
+  REPORT_VA_IN_STVAL_ON_STORE_AMO_PAGE_FAULT: true
+  REPORT_VA_IN_STVAL_ON_INSTRUCTION_PAGE_FAULT: true
+  TRAP_ON_ECALL_FROM_S: true
+  MSTATUS_VS_LEGAL_VALUES: [0]
+  MSTATUS_FS_LEGAL_VALUES: [0, 1, 2, 3]  # FS exists with S-mode, as in Spike
   # Sm params
   MXLEN: 64
   PRECISE_SYNCHRONOUS_EXCEPTIONS: true
@@ -55,6 +91,9 @@ params:
   REPORT_VA_IN_MTVAL_ON_STORE_AMO_ACCESS_FAULT: true
   REPORT_VA_IN_MTVAL_ON_INSTRUCTION_ACCESS_FAULT: true
   REPORT_ENCODING_IN_MTVAL_ON_ILLEGAL_INSTRUCTION: true
+  REPORT_VA_IN_MTVAL_ON_LOAD_PAGE_FAULT: true
+  REPORT_VA_IN_MTVAL_ON_STORE_AMO_PAGE_FAULT: true
+  REPORT_VA_IN_MTVAL_ON_INSTRUCTION_PAGE_FAULT: true
   MTVAL_WIDTH: 64
   CONFIG_PTR_ADDRESS: 0
   PMA_GRANULARITY: 3
@@ -68,5 +107,6 @@ params:
   MTVEC_ILLEGAL_WRITE_BEHAVIOR: retain
   NUM_PMP_ENTRIES: 0
   HPM_COUNTER_EN: [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]  # no Zicntr/Zihpm yet
-  MCOUNTINHIBIT_IMPLEMENTED: false
-  MCOUNTENABLE_EN: [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]  # no Zicntr/Zihpm yet
+  MCOUNTINHIBIT_IMPLEMENTED: true
+  COUNTINHIBIT_EN: [true, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]  # CY and IR
+  MCOUNTENABLE_EN: [true, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]  # CY, TM, IR (Zicntr); no Zihpm

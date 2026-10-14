@@ -7,7 +7,7 @@
     // raise an illegal instruction exception.
     "E": false,
     "writable_misa": false,
-    "writable_fiom": true,
+    "writable_fiom": false,
     // The top 29 bits in this value control whether the corresponding
     // HPM counters (hpmcounter31 .. hpmcounter3) are supported
     // (i.e. are not read-only zero). A set bit specifies that the
@@ -26,7 +26,7 @@
     // the top 29 bits of `writable_hpm_counters`.
     "scounteren_writable_bits": {
       "len": 32,
-      "value": "0x0"
+      "value": "0x7"
     },
     // The bits in this value control whether the corresponding bits
     // of the `mcounteren` CSR that control access to HPM counters,
@@ -36,7 +36,7 @@
     // bit is read-only zero.
     "mcounteren_writable_bits": {
       "len": 32,
-      "value": "0x0"
+      "value": "0x7"
     },
     "hcounteren_writable_bits": {
       "len": 32,
@@ -69,10 +69,10 @@
       // (i.e. 4-byte alignment), hence there is no configuration
       // parameter for it.
       "direct": {
-        "supported": false
+        "supported": true
       },
       "vectored": {
-        "supported": false,
+        "supported": true,
         "base_alignment": 2
       }
     },
@@ -95,7 +95,7 @@
       // not exist.
       "delegatable_bits": {
         "len": 64,
-        "value": "0x0000_0000_000c_b3FF"
+        "value": "0x0000_0000_0000_03FE"
       }
     },
     "mideleg": {
@@ -109,7 +109,7 @@
       // does not exist.
       "delegatable_bits": {
         "len": "xlen",
-        "value": "0x0000_0000_0000_2222"
+        "value": "0x0000_0000_0000_0222"
       }
     },
     // These settings control whether the specified exceptions
@@ -173,7 +173,7 @@
       // - "ExtContext_FourState" allows all values {Off, Initial, Clean, Dirty}.
       // - "ExtContext_TwoState" allows {Off, Dirty}, and writes of Initial and Clean get written as Dirty.
       // - "ExtContext_Off" allows only {Off}.  This makes the field read-only zero.
-      "fs_legal_states": "ExtContext_Off",  // no F: mstatus.FS is read-only zero
+      "fs_legal_states": "ExtContext_FourState",  // FS exists with S-mode, as in Spike
       "vs_legal_states": "ExtContext_Off"
     },
     // Set the version of the privileged ISA. `"Privileged_ISA_1_13"`
@@ -542,7 +542,7 @@
       "supported": false
     },
     "S": {
-      "supported": false,
+      "supported": true,
       "interrupts": {
         "software": { "supported": true },
         "external": { "supported": true },
@@ -619,7 +619,7 @@
       "supported": false
     },
     "Zicntr": {
-      "supported": false
+      "supported": true
     },
     "Zicsr": {
       "supported": true
@@ -858,8 +858,8 @@
       "supported": false
     },
     "Svbare": {
-      "supported": false,
-      "sfence_vma_illegal_if_svbare_only": true
+      "supported": true,
+      "sfence_vma_illegal_if_svbare_only": false
     },
     "Sv32": {
       "supported": false

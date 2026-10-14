@@ -5,4 +5,4 @@ ref_model_exe: sail_riscv_sim # Sail 0.14.1, the version this ACT4 commit is tes
 udb_config: rvsim-rv64imac.yaml
 linker_script: link.ld
 dut_include_dir: . # Directory containing DUT specific rvmodel_macros.h header
-include_priv_tests: False # privileged tests are enabled in Phase 3
+include_priv_tests: True

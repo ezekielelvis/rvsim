@@ -14,6 +14,10 @@
         .balign 8; .global fromhost; fromhost: .dword 0;     \
         .popsection
 
+// rvsim implements a standard M-mode (mtvec, mstatus, ...), so the framework
+// can install its trap handlers at boot.
+#define STANDARD_SM_SUPPORTED
+
 ##### STARTUP #####
 
 # Perform boot operations. Can be empty.
@@ -25,7 +29,7 @@
 // macro as blank to bypass the boot process.  If a nonconforming
 // M-mode is implemented, define this macro to set up the necessary
 // state in a fashion similar to RVTEST_BOOT_TO_MMODE.
-#define RVMODEL_BOOT_TO_MMODE
+//#define RVMODEL_BOOT_TO_MMODE  // rvsim has a conforming M-mode: use the default boot
 
 ##### TERMINATION #####
 
