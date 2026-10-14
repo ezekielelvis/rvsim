@@ -611,3 +611,74 @@ bit. Each entry caches a 4 KiB piece of a leaf, recording its level.
   add F to `-march`. The build script checks that this embedded word is the
   only FP instruction in each binary.
 - Difftest now gives Spike `mmu-type = "riscv,sv39"` and `_svadu`.
+
+---
+
+## ADR-026: Booting Linux: images, device tree and load layout
+
+**Status:** Accepted (Phase 6). Builds on ADR-002 (QEMU-virt memory map),
+ADR-005 (pinned versions) and ADR-006 (container builds).
+
+**Images.** `tests/images/build-images.sh` builds everything with Buildroot
+2026.02.3 (LTS; tarball SHA-256 pinned) in a `debian:bookworm-slim`
+container:
+
+- an RV64IMAC/LP64 musl toolchain. rvsim has no F/D, and distribution
+  riscv64 userlands are LP64D, so their libc would trap;
+- OpenSBI 1.5.1 `fw_jump` (generic platform, built for
+  `rv64imac_zicsr_zifencei`);
+- Linux 6.12.112 (LTS) from `tests/images/linux.config`. One hart, no FPU,
+  no modules, block devices or network; 16550 console; initramfs root. The
+  build fails if the resolved config enables the FPU;
+- BusyBox 1.37.0, Buildroot's pinned version (the brief's plan said 1.36.1;
+  Buildroot's tested version is preferred over patching it). Init starts a
+  root shell on the console without a login.
+
+The build tree lives in a container volume because the kernel sources need a
+case-sensitive filesystem. CI caches the outputs by a hash of `tests/images`.
+
+**Load layout** (fixed by OpenSBI's generic platform):
+
+| Address    | Contents                                          |
+|------------|---------------------------------------------------|
+| RAM + 0    | `fw_jump.bin`; the reset PC                       |
+| RAM + 2 MiB  | Linux `Image` (`FW_JUMP_OFFSET`)                |
+| RAM + 34 MiB | device tree (`FW_JUMP_FDT_OFFSET`)              |
+| top of RAM | initramfs, page-aligned                           |
+
+- Because the DTB is already at the address `fw_jump` copies it to, the
+  copy is a no-op.
+- The kernel's in-memory size (the Image header's `image_size`, bss
+  included) must end below the device tree.
+- The hart starts with `a0` = hart ID and `a1` = DTB address.
+
+**Device tree.** `vmm/fdt` is a small FDT v17 writer, checked against `dtc`
+in tests. `vmm/boot` describes:
+
+- one hart: `riscv,isa` and `riscv,isa-extensions`, `mmu-type
+  riscv,sv39`;
+- memory;
+- the CLINT (`sifive,clint0`, M software and timer interrupts);
+- the PLIC (31 sources; context 0 is M external, context 1 is S
+  external);
+- the 16550 UART (source 10, 3.6864 MHz clock);
+- `/chosen` with bootargs, `stdout-path` and the initrd range.
+
+The A/D extensions advertised follow `RV_CFG_HW_AD_UPDATE`: `svade` always
+(ADUE resets to 0), plus `svadu` when ADUE is writable.
+
+**Timebase.** 10 MHz: `mtime` advances once per 10 steps, i.e. a nominal
+virtual speed of 100 M steps/s. Guest time is virtual and deterministic.
+
+**Power-off.** The SiFive test finisher sits at `0x10_0000`, as on QEMU
+virt:
+- 0x5555 means pass, `0x3333 | code<<16` means fail, 0x7777 means reset;
+- it appears in the device tree with `syscon-poweroff`/`syscon-reboot`
+  nodes, which OpenSBI uses to implement SBI SRST;
+- so a guest `poweroff` ends `vm.Run` with `Exited`, and a reboot request
+  sets `Result.Reset`;
+- the store that triggers it retires before `Run` returns.
+
+**`RV_CFG_HW_AD_UPDATE`** now means "Svadu is implemented": `menvcfg.ADUE`
+is writable. Without it, ADUE is read-only zero and the hart is Svade only.
+This gives the existing ABI flag its ADR-025 meaning; the ABI is unchanged.

@@ -53,6 +53,7 @@ the same execution.
 
 | Region | Base | Size | Implemented in |
 |---|---|---|---|
+| Test finisher (power-off/reset) | `0x0010_0000` | 4 KiB | Go (ADR-026) |
 | CLINT | `0x0200_0000` | 64 KiB | C++ (ADR-020) |
 | PLIC | `0x0C00_0000` | 64 MiB | Go |
 | UART (16550A), PLIC source 10 | `0x1000_0000` | 256 B | Go |
@@ -60,6 +61,22 @@ the same execution.
 
 Any other physical address is an MMIO exit. If no device is mapped there, the
 VMM completes it as an access fault.
+
+## Booting Linux
+
+`rvsim boot -firmware fw_jump.bin -kernel Image -initrd rootfs.cpio` boots
+OpenSBI and Linux. `vmm/boot` loads the images:
+
+- firmware at the start of RAM;
+- the kernel at +2 MiB;
+- the device tree at +34 MiB;
+- the initramfs at the top of RAM.
+
+It also describes the platform in a device tree, using `vmm/fdt` (ADR-026).
+
+`make images` builds the three images with Buildroot in a container. `make
+linux` then boots them, runs commands at the BusyBox shell and powers off
+through the test finisher.
 
 ## Boundary performance
 
