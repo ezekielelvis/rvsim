@@ -57,6 +57,7 @@ the same execution.
 | CLINT | `0x0200_0000` | 64 KiB | C++ (ADR-020) |
 | PLIC | `0x0C00_0000` | 64 MiB | Go |
 | UART (16550A), PLIC source 10 | `0x1000_0000` | 256 B | Go |
+| virtio-mmio block device, PLIC source 1 (with a disk) | `0x1000_1000` | 4 KiB | Go (ADR-027) |
 | RAM | `0x8000_0000` | 256 MiB default | C++ |
 
 Any other physical address is an MMIO exit. If no device is mapped there, the
@@ -74,7 +75,11 @@ OpenSBI and Linux. `vmm/boot` loads the images:
 
 It also describes the platform in a device tree, using `vmm/fdt` (ADR-026).
 
-`make images` builds the three images with Buildroot in a container. `make
+With `-disk rootfs.ext4` (and no initramfs) the root filesystem is ext4 on
+a virtio block device. Requests complete in virtual time, as scheduled
+events (ADR-027).
+
+`make images` builds the images with Buildroot in a container. `make
 linux` then boots them, runs commands at the BusyBox shell and powers off
 through the test finisher.
 

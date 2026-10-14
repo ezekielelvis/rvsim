@@ -682,3 +682,65 @@ virt:
 **`RV_CFG_HW_AD_UPDATE`** now means "Svadu is implemented": `menvcfg.ADUE`
 is writable. Without it, ADUE is read-only zero and the hart is Svade only.
 This gives the existing ABI flag its ADR-025 meaning; the ABI is unchanged.
+
+---
+
+## ADR-027: virtio-mmio and virtio-blk
+
+**Status:** Accepted (Phase 7).
+
+**Transport.** virtio-mmio version 2 (Virtio 1.2 §4.2), in Go
+(`vmm/devices/virtio`), with split virtqueues (§2.7):
+
+- **Features:** the device offers `VIRTIO_F_VERSION_1` and nothing
+  transport-level beyond it: no indirect descriptors, no event index, no
+  packed ring. `FEATURES_OK` sticks only if the driver accepted a subset of
+  the offer that includes `VERSION_1`.
+- **Interrupts:** used-buffer notifications honour
+  `VIRTQ_AVAIL_F_NO_INTERRUPT`. The interrupt line is level-triggered and
+  stays high while `InterruptStatus` is nonzero.
+- **Descriptor chains** are treated as byte streams: device-readable bytes,
+  then device-writable bytes. The device makes no assumption about where
+  descriptors split (§2.6.4).
+- **Malformed rings** set `DEVICE_NEEDS_RESET` and raise a configuration
+  interrupt. These include loops, out-of-range indices, a readable
+  descriptor after a writable one, and addresses outside RAM.
+- **Register access:** registers are 32-bit. Other widths read 0, and writes
+  of other widths are ignored. Configuration space can be read at any width.
+
+**Block device** (`vmm/devices/virtio/blk`, §5.2):
+- **Placement:** one request queue of up to 256 entries, at `0x1000_1000`
+  on PLIC source 1 (QEMU virt's first virtio slot).
+- **Features:** offers `SEG_MAX` (254), `FLUSH`, and `RO` when read-only.
+- **Requests:**
+  - IN, OUT, FLUSH (`fsync` of the image) and GET_ID (a serial number of
+    up to 20 bytes) are supported; any other type returns UNSUPP;
+  - out-of-range, partial-sector or read-only writes return IOERR.
+- **Persistence:** guest writes go straight to the image file, so they
+  survive a reboot.
+
+**Timing (determinism).**
+- **Event:** a driver notification schedules one completion event at
+  `now + Latency` steps; the default is 5,000, which is 50 µs at the
+  nominal 100 M steps/s.
+- **Batching:** that event performs every request available at that moment,
+  in ring order, then interrupts once. Notifications while an event is
+  pending add nothing.
+- **Determinism:** the device does no host I/O on any other goroutine and
+  never consults the clock. Completion timing therefore depends only on
+  guest behaviour and the image's contents, which Phase 8 records as an
+  input.
+- **Reset:** a driver reset increments a generation number, and stale events
+  are ignored.
+
+**Guest memory.** Devices read and write guest RAM through
+`ReadPhys`/`WritePhys` (`virtio.Memory`), never through the read-only RAM
+view. That way the core sees every DMA write; Phase 12's decoded-instruction
+cache must invalidate on them.
+
+**Images.** The kernel config enables block devices, virtio-mmio,
+virtio-blk and ext4. Buildroot also produces `rootfs.ext4` (64 MiB). `rvsim
+boot -disk rootfs.ext4` boots with `root=/dev/vda rw` when no initramfs is
+given. The image build now checks every line of `linux.config` against the
+resolved kernel configuration, as it already did for the Buildroot
+defconfig.
