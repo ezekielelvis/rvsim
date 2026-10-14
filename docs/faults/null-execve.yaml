@@ -1,0 +1,7 @@
+# Corrupt a kernel function's argument: when the kernel first enters
+# kernel_execve (to start /init), its filename pointer (a0) becomes NULL.
+# The address is build-specific: nm build/images/vmlinux | grep ' kernel_execve$'
+faults:
+  - name: null-filename
+    when: {pc: {addr: 0xffffffff8009aa80}}
+    do: {reg: {reg: a0, set: 0}}

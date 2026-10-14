@@ -971,3 +971,72 @@ hits it with `kernel_filename = "/init"`, and backtraces through
 `run_init_process` and `kernel_init` to `ret_from_fork`. It also reads
 `priv` and memory through the kernel's page tables. A second test drives
 `reverse-continue` and `reverse-stepi` on a replay.
+
+---
+
+## ADR-031: Fault injection
+
+**Status:** Accepted (Phase 11).
+
+**Spec** (`vmm/fault`, `docs/FAULTS.md`): YAML (`go.yaml.in/yaml/v3`
+v3.0.4, strict: unknown fields are errors). It holds a seed and a list of
+faults, each with `when` (one trigger), `do` (one action) and `times`.
+
+**Triggers:**
+- **Step:** the run loop stops there.
+- **Instruction count:** the run loop budgets `N - instret` steps until
+  `instret` reaches N, so the fault fires exactly when it does.
+- **pc and hit count:** internal core breakpoints, plus a run-loop check of
+  the pc, so an arrival at a run boundary, which the core does not
+  re-report, still counts. Each arrival is counted once.
+- **Nth MMIO access** to a device (by bus name) or an address.
+- **Chance per event:** a seeded PCG, so it is deterministic given the
+  guest's events.
+
+**Actions** are immediate (bit flip, register set/xor/random) or apply to
+the next event of their kind:
+- an MMIO read, whose value is overridden after the device is still read;
+- an interrupt assertion, dropped or delayed, through a fault layer on the
+  PLIC source lines;
+- a virtio-blk request, failed or with one read byte XORed;
+- a UART byte, dropped or garbled, in either direction.
+
+**Where faults take effect.** Immediate faults apply only at a clean
+run-loop boundary, after the step's events and checkpoint and before input.
+An access trigger that fires mid-instruction (an MMIO access in flight)
+defers its immediate action to the next boundary. With faults configured,
+the run loop retires an in-flight MMIO instruction with a one-step run,
+just as it does for live input, so that boundary is the next step.
+
+**Log and replay.** Each fault applied produces a `fault.Applied` record
+with its concrete values. It gives the step, the event kind, and the
+event's ordinal among events of that kind at that step. It is printed
+(`-faults`) and stored in recordings as tag `0x10`, with a JSON payload. The
+recording header also carries the spec, for reference. Replay rebuilds the
+injector from these records rather than the spec:
+
+- immediate faults apply at their step, which is a run-loop deadline;
+- event faults apply to the matching event at that step.
+
+A faulty run therefore replays exactly. The test records a session with
+random garbling, a bit flip, a pc-triggered register XOR and a random MMIO
+read; three replays match every checkpoint and the fault log.
+
+**Limits.**
+- The fault layer's own state is not in snapshots or hashes: an interrupt
+  held back by a drop or delay. Jumping into a replay
+  (`replay -jump`) at a step where such a fault is in effect may diverge.
+- `access` triggers count MMIO accesses only; RAM accesses are not visible
+  to the VMM.
+- `mmio_read` faults do not affect the core's CLINT, which is not MMIO to
+  the VMM.
+
+**Tests.** Every action has a test showing its effect on a guest:
+- bare-metal guests (`vmm/vm/faults_test.go`): a flipped bit read back,
+  a corrupted register printed, an overridden MMIO read printed, UART bytes
+  dropped or garbled in both directions, and an interrupt lost or late in
+  `mip`;
+- Linux, booted from ext4 (`tests/linux/faults_test.go`): an injected disk
+  failure makes `dd` report `I/O error` after the kernel logs the failed
+  read and its retry, and an injected corruption changes the checksum of a
+  block until the cache is dropped and it is read again.

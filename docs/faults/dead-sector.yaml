@@ -1,0 +1,7 @@
+# A dead sector: once the shell has started, the next two virtio-blk
+# requests (a read and the kernel's retry of it) fail with an I/O error.
+faults:
+  - name: dead-sector
+    when: {step: 200000000}
+    do: {blk: {fail: true}}
+    times: 2

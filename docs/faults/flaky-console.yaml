@@ -1,0 +1,9 @@
+# A noisy serial line: 2% of the bytes the guest writes to the UART are
+# garbled with a random bit pattern. Seeded, so every run garbles the same
+# bytes.
+seed: 2026
+faults:
+  - name: noisy-uart
+    when: {chance: {p: 0.02}}
+    do: {uart: {dir: tx, garble: true}}
+    times: 0   # unlimited
