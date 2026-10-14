@@ -69,34 +69,20 @@ TEST_F(Cpu, JalrWithRdEqualRs1UsesOldValue) {
   EXPECT_EQ(x(1), kRamBase + 4);
 }
 
-// Unpriv §2.5: a jump or taken branch to a target that is not IALIGN-aligned
-// raises instruction-address-misaligned on the jump itself, with tval = target,
-// and rd is not written.
-TEST_F(Cpu, MisalignedJalTraps) {
+// Unpriv §2.5: with C implemented IALIGN=16, so every jump target (JALR
+// clears bit 0, offsets are even) is aligned and instruction-address-
+// misaligned cannot be raised. Targets on odd halfwords are legal.
+TEST_F(Cpu, JumpsToTwoByteAlignedTargets) {
   program({jal(1, 6)});
   run(1);
-  expect_trap(0, kRamBase + 6, kRamBase);
-  EXPECT_EQ(x(1), 0u);
+  EXPECT_EQ(pc(), kRamBase + 6);
+  EXPECT_EQ(x(1), kRamBase + 4);
 }
 
-TEST_F(Cpu, MisalignedJalrTraps) {
-  program({jalr(1, 2, 0)});
-  set_x(2, kRamBase + 0x102);
-  run(1);
-  expect_trap(0, kRamBase + 0x102, kRamBase);
-  EXPECT_EQ(x(1), 0u);
-}
-
-TEST_F(Cpu, MisalignedTakenBranchTraps) {
+TEST_F(Cpu, TakenBranchToTwoByteAlignedTarget) {
   program({beq(0, 0, 6)});
   run(1);
-  expect_trap(0, kRamBase + 6, kRamBase);
-}
-
-TEST_F(Cpu, MisalignedUntakenBranchDoesNotTrap) {
-  program({bne(0, 0, 6)});
-  run(1);
-  EXPECT_EQ(pc(), kRamBase + 4);
+  EXPECT_EQ(pc(), kRamBase + 6);
 }
 
 TEST_F(Cpu, FetchOutsideRamIsAccessFault) {

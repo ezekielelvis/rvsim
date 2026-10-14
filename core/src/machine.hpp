@@ -25,6 +25,9 @@ struct rv_machine {
   uint64_t steps = 0;
   uint64_t instret = 0;
 
+  // LR/SC reservation: the reserved physical address, or kNoReservation.
+  uint64_t reservation = ~0ull;
+
   // Interrupt inputs driven by the VMM.
   uint64_t irq_lines = 0;
   uint64_t irq_suppress = 0;
@@ -55,6 +58,8 @@ struct rv_machine {
 };
 
 namespace rv {
+
+constexpr uint64_t kNoReservation = ~0ull;
 
 // Runs until an exit; fills m->exit. Defined in cpu/execute.cpp.
 void run(rv_machine* m, uint64_t max_steps);

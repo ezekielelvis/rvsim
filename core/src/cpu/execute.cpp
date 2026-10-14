@@ -1,6 +1,8 @@
 // The interpreter: fetch, decode, execute, trap. One call to step() is one
 // step of virtual time: either a retired instruction or a taken trap.
+#include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "csr/csr.hpp"
 #include "decode/decode.hpp"
@@ -9,10 +11,14 @@
 namespace rv {
 namespace {
 
-// IALIGN=32 until the C extension arrives (Unpriv §1.5): a jump or taken
-// branch to an address that is not 4-byte aligned raises
-// instruction-address-misaligned (Unpriv §2.5).
-constexpr uint64_t kIalignMask = 3;
+// With the C extension IALIGN=16 (Unpriv §1.5). Jump and branch targets are
+// always even (JALR clears bit 0), so this check cannot fire today; it stays
+// because a misaligned-target trap is architectural if C is ever disabled.
+constexpr uint64_t kIalignMask = 1;
+
+// The 128-bit integers used by MULH* (GCC/Clang extension, hence __extension__).
+__extension__ using i128 = __int128;
+__extension__ using u128 = unsigned __int128;
 
 constexpr uint64_t kNoException = ~0ull;
 
@@ -28,6 +34,31 @@ constexpr Exception raise(uint64_t cause, uint64_t tval) { return {cause, tval};
 enum class Step { Retired, Trapped, Halt };
 
 constexpr int64_t sext32(uint64_t v) { return static_cast<int32_t>(static_cast<uint32_t>(v)); }
+
+// Division per Unpriv §13.2 Table 13.1: x/0 = all ones, x%0 = x; the signed
+// overflow case (most negative / -1) yields the dividend and remainder 0.
+// The special cases are handled before the C++ operator, whose behaviour
+// would be undefined.
+template <typename S>
+S div_signed(S a, S b) {
+  if (b == 0) return -1;
+  if (a == std::numeric_limits<S>::min() && b == -1) return a;
+  return a / b;
+}
+template <typename S>
+S rem_signed(S a, S b) {
+  if (b == 0) return a;
+  if (a == std::numeric_limits<S>::min() && b == -1) return 0;
+  return a % b;
+}
+template <typename U>
+U div_unsigned(U a, U b) {
+  return b == 0 ? std::numeric_limits<U>::max() : a / b;
+}
+template <typename U>
+U rem_unsigned(U a, U b) {
+  return b == 0 ? a : a % b;
+}
 
 template <bool kTrace>
 void emit(rv_machine* m, const rv_trace_record& rec) {
@@ -82,20 +113,41 @@ Exception load(rv_machine* m, uint64_t addr, T& out) {
   return ok();
 }
 
+// Writes RAM that has already been checked, then applies HTIF (ADR-013): a
+// command is latched when a store writes the most significant byte of
+// tohost and leaves tohost non-zero. Guests write the 64-bit command as two
+// 32-bit stores, low word first, so latching on the low word would act on a
+// half-written command.
+template <typename T>
+void store_ram(rv_machine* m, uint64_t addr, T value) {
+  std::memcpy(m->ram_ptr(addr), &value, sizeof(T));
+  const uint64_t tohost = m->cfg.htif_tohost;
+  if (tohost != 0 && addr <= tohost + 7 && tohost + 7 < addr + sizeof(T)) {
+    uint64_t v;
+    std::memcpy(&v, m->ram_ptr(tohost), 8);
+    m->htif_halt = v != 0;
+  }
+}
+
 template <typename T>
 Exception store(rv_machine* m, uint64_t addr, T value) {
   if ((addr & (sizeof(T) - 1)) != 0 && (m->cfg.flags & RV_CFG_MISALIGNED_OK) == 0) {
     return raise(kCauseMisalignedStore, addr);
   }
   if (!m->ram_contains(addr, sizeof(T))) return raise(kCauseStoreAccess, addr);
-  std::memcpy(m->ram_ptr(addr), &value, sizeof(T));
-  // HTIF: a store that leaves tohost non-zero asks the host to act.
-  const uint64_t tohost = m->cfg.htif_tohost;
-  if (tohost != 0 && addr < tohost + 8 && tohost < addr + sizeof(T)) {
-    uint64_t v;
-    std::memcpy(&v, m->ram_ptr(tohost), 8);
-    m->htif_halt = v != 0;
+  store_ram(m, addr, value);
+  return ok();
+}
+
+// Atomics require natural alignment regardless of RV_CFG_MISALIGNED_OK, and
+// only RAM supports them (Unpriv §14.2, §14.4; Priv §3.6.3). SC and AMOs
+// report faults as store/AMO exceptions; LR reports them as load exceptions.
+template <typename T>
+Exception check_atomic(const rv_machine* m, uint64_t addr, bool is_lr) {
+  if ((addr & (sizeof(T) - 1)) != 0) {
+    return raise(is_lr ? kCauseMisalignedLoad : kCauseMisalignedStore, addr);
   }
+  if (!m->ram_contains(addr, sizeof(T))) return raise(is_lr ? kCauseLoadAccess : kCauseStoreAccess, addr);
   return ok();
 }
 
@@ -165,6 +217,59 @@ class Executor {
       case Op::Sllw: wrs(sext32(static_cast<uint32_t>(a) << sh32)); return ok();
       case Op::Srlw: wrs(sext32(static_cast<uint32_t>(a) >> sh32)); return ok();
       case Op::Sraw: wrs(static_cast<int32_t>(a) >> sh32); return ok();
+      // M extension (Unpriv §13.1-13.2).
+      case Op::Mul: wr(a * b); return ok();
+      case Op::Mulh:
+        wr(static_cast<uint64_t>((static_cast<i128>(static_cast<int64_t>(a)) * static_cast<int64_t>(b)) >> 64));
+        return ok();
+      case Op::Mulhsu:
+        wr(static_cast<uint64_t>((static_cast<i128>(static_cast<int64_t>(a)) * static_cast<i128>(b)) >> 64));
+        return ok();
+      case Op::Mulhu: wr(static_cast<uint64_t>((static_cast<u128>(a) * b) >> 64)); return ok();
+      case Op::Div: wrs(div_signed(static_cast<int64_t>(a), static_cast<int64_t>(b))); return ok();
+      case Op::Divu: wr(div_unsigned(a, b)); return ok();
+      case Op::Rem: wrs(rem_signed(static_cast<int64_t>(a), static_cast<int64_t>(b))); return ok();
+      case Op::Remu: wr(rem_unsigned(a, b)); return ok();
+      case Op::Mulw: wrs(sext32(a * b)); return ok();
+      case Op::Divw: wrs(div_signed(static_cast<int32_t>(a), static_cast<int32_t>(b))); return ok();
+      case Op::Divuw:
+        wrs(sext32(div_unsigned(static_cast<uint32_t>(a), static_cast<uint32_t>(b))));
+        return ok();
+      case Op::Remw: wrs(rem_signed(static_cast<int32_t>(a), static_cast<int32_t>(b))); return ok();
+      case Op::Remuw:
+        wrs(sext32(rem_unsigned(static_cast<uint32_t>(a), static_cast<uint32_t>(b))));
+        return ok();
+      // A extension (Unpriv ch. 14).
+      case Op::LrW: return lr<int32_t>(a);
+      case Op::LrD: return lr<int64_t>(a);
+      case Op::ScW: return sc<uint32_t>(a, b);
+      case Op::ScD: return sc<uint64_t>(a, b);
+      case Op::AmoswapW: return amo<uint32_t>(a, [b](uint32_t) { return static_cast<uint32_t>(b); });
+      case Op::AmoaddW: return amo<uint32_t>(a, [b](uint32_t v) { return v + static_cast<uint32_t>(b); });
+      case Op::AmoxorW: return amo<uint32_t>(a, [b](uint32_t v) { return v ^ static_cast<uint32_t>(b); });
+      case Op::AmoandW: return amo<uint32_t>(a, [b](uint32_t v) { return v & static_cast<uint32_t>(b); });
+      case Op::AmoorW: return amo<uint32_t>(a, [b](uint32_t v) { return v | static_cast<uint32_t>(b); });
+      case Op::AmominW:
+        return amo<uint32_t>(a, [b](uint32_t v) {
+          return static_cast<int32_t>(v) < static_cast<int32_t>(b) ? v : static_cast<uint32_t>(b);
+        });
+      case Op::AmomaxW:
+        return amo<uint32_t>(a, [b](uint32_t v) {
+          return static_cast<int32_t>(v) > static_cast<int32_t>(b) ? v : static_cast<uint32_t>(b);
+        });
+      case Op::AmominuW: return amo<uint32_t>(a, [b](uint32_t v) { return std::min(v, static_cast<uint32_t>(b)); });
+      case Op::AmomaxuW: return amo<uint32_t>(a, [b](uint32_t v) { return std::max(v, static_cast<uint32_t>(b)); });
+      case Op::AmoswapD: return amo<uint64_t>(a, [b](uint64_t) { return b; });
+      case Op::AmoaddD: return amo<uint64_t>(a, [b](uint64_t v) { return v + b; });
+      case Op::AmoxorD: return amo<uint64_t>(a, [b](uint64_t v) { return v ^ b; });
+      case Op::AmoandD: return amo<uint64_t>(a, [b](uint64_t v) { return v & b; });
+      case Op::AmoorD: return amo<uint64_t>(a, [b](uint64_t v) { return v | b; });
+      case Op::AmominD:
+        return amo<uint64_t>(a, [b](uint64_t v) { return static_cast<int64_t>(v) < static_cast<int64_t>(b) ? v : b; });
+      case Op::AmomaxD:
+        return amo<uint64_t>(a, [b](uint64_t v) { return static_cast<int64_t>(v) > static_cast<int64_t>(b) ? v : b; });
+      case Op::AmominuD: return amo<uint64_t>(a, [b](uint64_t v) { return std::min(v, b); });
+      case Op::AmomaxuD: return amo<uint64_t>(a, [b](uint64_t v) { return std::max(v, b); });
       // A single in-order hart with no caches: FENCE and FENCE.I need no work.
       // FENCE.I will invalidate the decode cache in Phase 12.
       case Op::Fence:
@@ -247,6 +352,65 @@ class Executor {
     return ok();
   }
 
+  // LR (Unpriv §14.2): load and register a reservation on the address.
+  template <typename T>
+  Exception lr(uint64_t addr) {
+    if (Exception e = check_atomic<T>(m_, addr, true); e.raised()) return e;
+    T v;
+    std::memcpy(&v, m_->ram_ptr(addr), sizeof(T));
+    m_->reservation = addr;
+    wrs(static_cast<int64_t>(v));
+    if constexpr (kTrace) {
+      rec_.flags |= RV_TF_LOAD;
+      rec_.mem_addr = addr;
+      rec_.mem_size = sizeof(T);
+    }
+    return ok();
+  }
+
+  // SC (Unpriv §14.2): store only if the reservation is still on this
+  // address; rd = 0 on success, 1 on failure. Alignment and access faults are
+  // raised even when the SC would fail, and every SC clears the reservation.
+  // Like Spike, the reservation matches on address alone, and plain stores by
+  // this hart do not clear it: the spec only requires failure after another
+  // hart's store to the reservation set.
+  template <typename T>
+  Exception sc(uint64_t addr, uint64_t value) {
+    if (Exception e = check_atomic<T>(m_, addr, false); e.raised()) return e;
+    const bool success = m_->reservation == addr;
+    m_->reservation = kNoReservation;
+    if (success) {
+      store_ram(m_, addr, static_cast<T>(value));
+      if constexpr (kTrace) {
+        rec_.flags |= RV_TF_STORE;
+        rec_.mem_addr = addr;
+        rec_.mem_size = sizeof(T);
+        rec_.mem_value = static_cast<T>(value);
+      }
+    }
+    wr(success ? 0 : 1);
+    return ok();
+  }
+
+  // AMO (Unpriv §14.4): rd gets the old value (sign-extended for .W), memory
+  // gets op(old, rs2).
+  template <typename T, typename F>
+  Exception amo(uint64_t addr, F op) {
+    if (Exception e = check_atomic<T>(m_, addr, false); e.raised()) return e;
+    T old;
+    std::memcpy(&old, m_->ram_ptr(addr), sizeof(T));
+    const T updated = op(old);
+    store_ram(m_, addr, updated);
+    wrs(sizeof(T) == 4 ? sext32(old) : static_cast<int64_t>(old));
+    if constexpr (kTrace) {
+      rec_.flags |= RV_TF_LOAD | RV_TF_STORE;
+      rec_.mem_addr = addr;
+      rec_.mem_size = sizeof(T);
+      rec_.mem_value = updated;
+    }
+    return ok();
+  }
+
   // Zicsr §9.1. CSRRW/CSRRWI with rd=x0 do not read; CSRRS/CSRRC(I) with
   // rs1=x0 / uimm=0 do not write, so read-only CSRs can be read with them.
   Exception csr() {
@@ -319,13 +483,26 @@ Step step(rv_machine* m) {
     rec.priv = h.priv;
   }
 
-  // Fetch. RAM is the only executable region.
-  if (!m->ram_contains(h.pc, 4)) return take_trap<kTrace>(m, raise(kCauseFetchAccess, h.pc), rec);
-  uint32_t raw;
-  std::memcpy(&raw, m->ram_ptr(h.pc), 4);
-  const Insn d = decode32(raw);
+  // Fetch one parcel, then a second if the first says the instruction is 32
+  // bits (Unpriv §1.5). RAM is the only executable region. A fault on the
+  // second parcel reports that parcel's address in mtval while mepc points
+  // at the instruction (Priv §3.1.16).
+  if (!m->ram_contains(h.pc, 2)) return take_trap<kTrace>(m, raise(kCauseFetchAccess, h.pc), rec);
+  uint16_t lo;
+  std::memcpy(&lo, m->ram_ptr(h.pc), 2);
+  Insn d;
+  if ((lo & 3) != 3) {
+    d = decode16(lo);
+  } else {
+    if (!m->ram_contains(h.pc + 2, 2)) {
+      return take_trap<kTrace>(m, raise(kCauseFetchAccess, h.pc + 2), rec);
+    }
+    uint16_t hi;
+    std::memcpy(&hi, m->ram_ptr(h.pc + 2), 2);
+    d = decode32(static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16));
+  }
   if constexpr (kTrace) {
-    rec.insn = raw;
+    rec.insn = d.raw;
     rec.insn_len = d.len;
   }
 
@@ -364,6 +541,7 @@ void reset_hart(rv_machine* m) {
   m->steps = 0;
   m->instret = 0;
   m->htif_halt = false;
+  m->reservation = kNoReservation;
 }
 
 void run(rv_machine* m, uint64_t max_steps) {

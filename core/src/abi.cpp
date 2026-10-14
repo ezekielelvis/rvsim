@@ -163,7 +163,15 @@ int rv_read_phys(const rv_machine* m, uint64_t paddr, void* buf, size_t len) {
 int rv_write_phys(rv_machine* m, uint64_t paddr, const void* buf, size_t len) {
   if (m == nullptr || (buf == nullptr && len != 0)) return RV_E_INVAL;
   if (!m->ram_contains(paddr, len)) return RV_E_RANGE;
-  if (len != 0) std::memcpy(m->ram + (paddr - m->cfg.ram_base), buf, len);
+  if (len == 0) return RV_OK;
+  std::memcpy(m->ram + (paddr - m->cfg.ram_base), buf, len);
+  // A write by another agent (DMA, debugger) into the reservation set must
+  // make a later SC fail (Unpriv §14.2). The reservation set is the aligned
+  // doubleword containing the reserved address.
+  const uint64_t set = m->reservation & ~7ull;
+  if (m->reservation != rv::kNoReservation && paddr < set + 8 && set < paddr + len) {
+    m->reservation = rv::kNoReservation;
+  }
   return RV_OK;
 }
 

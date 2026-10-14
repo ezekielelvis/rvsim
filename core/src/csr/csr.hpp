@@ -24,8 +24,10 @@ constexpr uint16_t kMhartid = 0xf14;
 constexpr uint16_t kMconfigptr = 0xf15;
 }  // namespace csrno
 
-// misa: MXL=64, extensions I and U (Priv §3.1.1). Read-only, which WARL permits.
-constexpr uint64_t kMisa = (2ull << 62) | (1ull << ('I' - 'A')) | (1ull << ('U' - 'A'));
+// misa: MXL=64, extensions A, C, I, M and U (Priv §3.1.1). Read-only, which
+// WARL permits.
+constexpr uint64_t kMisa = (2ull << 62) | (1ull << ('A' - 'A')) | (1ull << ('C' - 'A')) |
+                           (1ull << ('I' - 'A')) | (1ull << ('M' - 'A')) | (1ull << ('U' - 'A'));
 
 // Privilege and read-only checks from the CSR address itself (Priv §2.1):
 // csr[11:10] == 0b11 marks read-only, csr[9:8] is the lowest privilege allowed.

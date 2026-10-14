@@ -33,8 +33,8 @@ bool csr_read(const rv_machine* m, uint16_t csr, uint64_t& out) {
     case csrno::kMie: out = c.mie; return true;
     case csrno::kMtvec: out = c.mtvec; return true;
     case csrno::kMscratch: out = c.mscratch; return true;
-    // IALIGN=32 without C: mepc[1] reads as zero (Priv §3.1.14).
-    case csrno::kMepc: out = c.mepc & ~3ull; return true;
+    // IALIGN=16 with C: only mepc[0] is zero (Priv §3.1.14).
+    case csrno::kMepc: out = c.mepc; return true;
     case csrno::kMcause: out = c.mcause; return true;
     case csrno::kMtval: out = c.mtval; return true;
     case csrno::kMip: out = c.mip; return true;

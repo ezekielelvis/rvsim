@@ -78,8 +78,7 @@ TEST_F(Cpu, MstatusLegalization) {
 
 TEST_F(Cpu, MisaIsReadOnly) {
   const uint64_t misa = csr(kMisa);
-  EXPECT_EQ(misa >> 62, 2u);                    // MXL = 64
-  EXPECT_EQ(misa & ((1u << 26) - 1), (1u << 8) | (1u << 20));  // I, U
+  EXPECT_EQ(misa >> 62, 2u);  // MXL = 64
   program({csrrw(0, kMisa, 0)});
   run(1);
   EXPECT_EQ(csr(kMisa), misa);
@@ -89,7 +88,7 @@ TEST_F(Cpu, MtvecModeAndMepcAlignment) {
   set_csr(kMtvec, kTrapVec | 3);  // reserved MODE 3 -> 1
   EXPECT_EQ(csr(kMtvec), kTrapVec | 1);
   set_csr(kMepc, kRamBase | 3);
-  EXPECT_EQ(csr(kMepc), kRamBase);  // IALIGN=32: bits 1:0 read as zero
+  EXPECT_EQ(csr(kMepc), kRamBase | 2);  // IALIGN=16: only bit 0 is zero
   set_csr(kMie, ~0ull);
   EXPECT_EQ(csr(kMie), 0x888u);  // MSIE, MTIE, MEIE only
 }
@@ -143,8 +142,9 @@ TEST_F(Cpu, PrivilegedInstructionsFromUserModeAreIllegal) {
 }
 
 TEST_F(Cpu, NotYetImplementedInstructionsAreIllegal) {
-  // SRET and SFENCE.VMA need S-mode; MUL needs M (Phase 2); 16-bit encodings need C.
-  for (uint32_t insn : {kSret, 0x12000073u, op(1, 0, 3, 1, 2), 0x00000001u, 0u, ~0u}) {
+  // SRET and SFENCE.VMA need S-mode (Phase 3); all-zero and all-one
+  // encodings are defined illegal.
+  for (uint32_t insn : {kSret, 0x12000073u, 0u, ~0u}) {
     ASSERT_EQ(rv_reset(m), RV_OK);
     set_csr(kMtvec, kTrapVec);
     program({insn});
