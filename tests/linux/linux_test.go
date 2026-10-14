@@ -13,6 +13,7 @@ import (
 
 	"github.com/ezekielelvis/rvsim/vmm/boot"
 	"github.com/ezekielelvis/rvsim/vmm/devices/virtio/blk"
+	"github.com/ezekielelvis/rvsim/vmm/fault"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
 	"github.com/ezekielelvis/rvsim/vmm/vm"
 )
@@ -106,9 +107,14 @@ func newGuest(t *testing.T, img boot.Images) *guest {
 
 func newGuestWithDisk(t *testing.T, img boot.Images, disk *blk.Config) *guest {
 	t.Helper()
+	return newGuestWithFaults(t, img, disk, nil)
+}
+
+func newGuestWithFaults(t *testing.T, img boot.Images, disk *blk.Config, faults *fault.Injector) *guest {
+	t.Helper()
 	cfg := machine.DefaultConfig()
 	g := &guest{t: t}
-	v, err := vm.New(vm.Config{Machine: cfg, Console: &g.console, Disk: disk})
+	v, err := vm.New(vm.Config{Machine: cfg, Console: &g.console, Disk: disk, Faults: faults})
 	if err != nil {
 		t.Fatal(err)
 	}
