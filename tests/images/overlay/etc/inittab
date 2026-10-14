@@ -1,0 +1,6 @@
+# rvsim: no getty, no login; a root shell on the console.
+::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/mount -t sysfs sysfs /sys
+::sysinit:/bin/hostname -F /etc/hostname
+console::respawn:-/bin/sh
+::shutdown:/bin/umount -a -r

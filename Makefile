@@ -7,7 +7,7 @@ JOBS       ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 GO         ?= go
 CMAKE      ?= cmake
 
-.PHONY: all core core-test go-build go-test lint test sanitize go-asan riscv-tests compliance difftest archtest-elfs archtest platform bench toolchain clean
+.PHONY: all core core-test go-build go-test lint test sanitize go-asan riscv-tests compliance difftest archtest-elfs archtest platform images linux bench toolchain clean
 
 all: go-build
 
@@ -68,6 +68,14 @@ archtest: core
 ## platform: bare-metal programs exercising the devices (needs riscv64-unknown-elf-gcc)
 platform: core
 	$(GO) test -count=1 ./tests/platform
+
+## images: build OpenSBI, Linux and a BusyBox initramfs in a container (podman or docker)
+images:
+	tests/images/build-images.sh
+
+## linux: boot Linux to a BusyBox shell and run commands (needs `make images`)
+linux: core
+	RVSIM_REQUIRE_LINUX=1 $(GO) test -count=1 -v -timeout 60m ./tests/linux
 
 bench: core
 	$(GO) test -run '^$$' -bench . -benchmem ./...
