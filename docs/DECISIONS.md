@@ -175,7 +175,8 @@ Difftest compares per-instruction commit logs, so any configuration
 difference shows up as a divergence. Spike is invoked with:
 
 - `--isa` = exactly what rvsim implements in the current phase (Phase 1:
-  `rv64i_zicsr_zifencei`), plus `_zicclsm` for tests that need
+  `rv64i_zicsr_zifencei`; Phase 2: `rv64imac_zicsr_zifencei`), plus
+  `_zicclsm` for tests that need
   misaligned access (rvsim runs those with `RV_CFG_MISALIGNED_OK`).
 - `--priv` = the implemented modes (Phase 1: `MU`).
 - `--pmpregions=0` (ADR-007).
@@ -206,3 +207,89 @@ splitting a step's records. Go formats COMMIT records as Spike
 log traps). A COMMIT holds at most one CSR write; if a later extension needs
 more (e.g. a `sstatus` write that Spike logs as several CSRs), the format
 version is bumped.
+
+---
+
+## ADR-012: LR/SC reservation semantics
+
+**Status:** Accepted (Phase 2)
+
+Unpriv §14.2 leaves the reservation set's size, and most invalidation events,
+to the implementation. rvsim follows Spike where it can:
+
+- LR records the reserved physical address. An SC succeeds only if the
+  reservation is on exactly that address (the size is not compared).
+- **Every SC clears the reservation**, whether it succeeds or fails.
+- An SC that would fail still checks alignment and RAM bounds, raising
+  store/AMO misaligned or access-fault.
+- Plain stores by this hart, traps, and xRET leave the reservation alone. The
+  spec only requires an SC to fail after another hart's store to the
+  reservation set, and lets xRET clear the reservation but does not require
+  it (Priv §3.3.2).
+- A write by another agent (`rv_write_phys`: DMA or debugger) into the
+  aligned doubleword containing the reserved address clears it.
+- `rv_reset` clears it.
+- LR, SC and AMOs need natural alignment even when
+  `RV_CFG_MISALIGNED_OK` is set. LR raises load-misaligned and load
+  access-fault; SC and AMOs raise the store/AMO versions.
+
+**Spike difference.** Spike also drops the reservation at the end of every
+scheduling quantum. `sim_t::step` charges the full 5000-step quantum even
+when the hart stops early at a trap, so the drop lands about 5000 steps after
+the last trap. A Spike SC can therefore fail where rvsim's succeeds. Both are
+legal, since an SC may fail for implementation-specific reasons. Difftest
+handles exactly this case: when Spike's SC fails at the same pc where
+rvsim's succeeded, it skips Spike's retry lines (at most 16) until the logs
+agree again, and reports the count. Any other difference is still a
+divergence. In Phase 2 this happens once, in `rv64ua-p-lrsc`.
+
+---
+
+## ADR-013: HTIF command latching and the console device
+
+**Status:** Accepted (Phase 2)
+
+HTIF is a host convention, not part of the ISA. Guests write the 64-bit
+`tohost` command as two 32-bit stores, low word first: riscv-tests,
+ACT4's halt macros and its console macro all do this. For console output the
+low word alone is just the character, so acting on the first store would turn
+an odd character into a bogus "exit" command. Spike avoids this only because
+its host polls `tohost` between quanta.
+
+rvsim **latches a command when a store writes the most significant byte of
+`tohost`** and leaves `tohost` non-zero. A doubleword store or AMO covers the
+whole word and latches at once. The core then exits with `RV_EXIT_HALT` and
+the command in `value`. The Go side implements fesvr's commands:
+
+| Command | Meaning | Host action |
+|---|---|---|
+| device 0, command 0, bit 0 set | exit with code `payload >> 1` | stop |
+| device 1, command 1 | console putchar | write the byte, clear `tohost`, set `fromhost = 1<<56 \| 1<<48 \| 0x100 \| char` |
+
+Other commands (for example the syscall proxy) are reported as unsupported.
+
+---
+
+## ADR-014: Architecture tests come from ACT4 with Sail 0.14.1
+
+**Status:** Accepted (Phase 2)
+
+riscv-arch-test has replaced RISCOF with the ACT4 framework. ACT4 generates
+self-checking ELFs for a described implementation: it runs each test on the
+Sail reference model, configured to match the implementation, and compiles
+the expected results into the test.
+
+- **rvsim's description** is in `tests/archtest/rvsim-rv64imac/`: a UDB
+  configuration, `sail.json`, a linker script for 256 MiB of RAM at
+  `0x8000_0000`, and HTIF `rvmodel_macros.h`. It was derived from ACT4's
+  `sail-RVI20U64` config and edited to match rvsim: no F/D/Zicntr/Zihpm,
+  misaligned loads, stores and atomics raise address-misaligned (ADR-004,
+  ADR-012), and U-mode is implemented.
+- **Unprivileged tests only for now** (`include_priv_tests: False`). The
+  privileged parameters (counters, `mtvec` write behaviour, U-mode details)
+  become accurate when the privileged tests are enabled in Phase 3.
+- **Pinned versions:** ACT4 commit `d40cf3d` (2026-09-28) and Sail 0.14.1,
+  the version that commit's own CI uses. Its README names 0.15, released
+  2026-10-06.
+- **Pass criterion:** a test passes only if it prints
+  `RVCP-SUMMARY: TEST PASSED` and then exits with code 0.
