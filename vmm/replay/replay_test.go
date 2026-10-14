@@ -14,7 +14,9 @@ import (
 )
 
 // echoProgram polls the UART, echoes each byte, appends it to a buffer in
-// RAM, and powers off through the finisher after a 'q'.
+// RAM, spins ~4,000 steps (so a session spans enough virtual time for
+// several checkpoints however fast the host is), and powers off through the
+// finisher after a 'q'.
 func echoProgram() []byte {
 	return Bytes(
 		Lui(T0, 0x10000), // UART
@@ -28,8 +30,11 @@ func echoProgram() []byte {
 		Sb(A0, T0, 0),  // echo
 		Sb(A0, T2, 0),
 		Addi(T2, T2, 1),
+		Addi(S1, Zero, 2000),
+		Addi(S1, S1, -1),
+		Bne(S1, Zero, -4),
 		Addi(T1, Zero, 'q'),
-		Bne(A0, T1, -32),
+		Bne(A0, T1, -44),
 		Lui(T1, 5),
 		Addi(T1, T1, 0x555),
 		Sw(T1, S0, 0), // power off
@@ -124,8 +129,8 @@ func TestRecordThenReplayTenTimes(t *testing.T) {
 	if last := recs[len(recs)-1]; last.Tag != TagEnd || last.Reason != EndExit {
 		t.Fatalf("last record %+v", last)
 	}
-	// How many of each depends on host timing, which this test randomizes.
-	if inputs == 0 || ckpts == 0 {
+	// 13 bytes before the q, at >= 4,000 steps each, span >= 10 checkpoints.
+	if inputs == 0 || ckpts < 10 {
 		t.Fatalf("%d input and %d checkpoint records", inputs, ckpts)
 	}
 	for _, role := range []string{"firmware", "kernel", "disk", "dtb"} {
