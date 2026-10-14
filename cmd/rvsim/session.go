@@ -13,6 +13,8 @@ import (
 	"github.com/ezekielelvis/rvsim/vmm/vm"
 )
 
+type replaySpec = replay.Spec
+
 // imageFlags are the image and platform flags boot, record and replay share.
 type imageFlags struct {
 	firmware, kernel, initrd, disk *string
@@ -142,6 +144,8 @@ func replayCmd(args []string) int {
 	quiet := fs.Bool("q", false, "do not print the guest's console output")
 	snapEvery := fs.Uint64("snapshot-every", 0, "save a snapshot every `n` steps into -snapshot-dir")
 	snapDir := fs.String("snapshot-dir", "", "`directory` of snapshots for -snapshot-every and -jump")
+	gdbAddr := fs.String("gdb", "", "serve the replay to GDB on TCP `address` (e.g. localhost:1234),\nwith reverse-step and reverse-continue")
+	verbose := fs.Bool("v", false, "with -gdb, log the protocol to stderr")
 	jump := fs.Uint64("jump", 0, "go to step `n` (restoring the nearest snapshot in -snapshot-dir),\nprint the state hashes there, and stop (or, with -trace, trace on from there)")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
@@ -153,6 +157,9 @@ func replayCmd(args []string) int {
 		console = io.Discard
 	}
 	spec := replay.Spec{Firmware: *firmware, Kernel: *kernel, Initrd: *initrd, Disk: *disk, KeepDisk: *keepDisk}
+	if *gdbAddr != "" {
+		return replayGDB(fs.Arg(0), *gdbAddr, spec, *verbose)
+	}
 	if *snapEvery != 0 && *snapDir == "" {
 		fs.Usage()
 		return 2

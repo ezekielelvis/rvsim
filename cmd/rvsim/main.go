@@ -20,6 +20,7 @@ const usage = `usage: rvsim <command> [flags]
 
 commands:
   boot      boot OpenSBI and a Linux kernel
+  gdb       boot under a GDB remote stub
   record    boot and record the session for replay
   replay    replay a recorded session and check it is identical
   restore   resume a snapshot
@@ -38,6 +39,8 @@ func main() {
 	switch os.Args[1] {
 	case "boot":
 		os.Exit(bootCmd(os.Args[2:]))
+	case "gdb":
+		os.Exit(gdbCmd(os.Args[2:]))
 	case "record":
 		os.Exit(recordCmd(os.Args[2:]))
 	case "replay":
