@@ -268,3 +268,56 @@ func TestReadRejectsBadFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestJumpToStepRestoresTheNearestSnapshot(t *testing.T) {
+	spec := testSpec(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.rvrec")
+	record(t, spec, path, "jump around, rvsim\nq")
+
+	snaps := filepath.Join(dir, "snaps")
+	if err := os.Mkdir(snaps, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := StartReplay(path, Spec{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SnapshotEvery(15_000, snaps)
+	rep, err := s.Replay()
+	s.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(snaps)
+	if len(entries) == 0 {
+		t.Fatal("no snapshots written")
+	}
+
+	for _, step := range []uint64{7_000, 31_234, 45_000, rep.Steps - 1} {
+		// Reference: replay from the start to step.
+		ref, err := StartReplay(path, Spec{}, &bytes.Buffer{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ref.VM.Run(step); err != nil {
+			t.Fatal(err)
+		}
+		want, _ := ref.VM.StateHashes()
+		ref.Close()
+
+		j, err := JumpTo(path, Spec{}, snaps, step, &bytes.Buffer{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := j.VM.StateHashes()
+		if j.VM.Now() != step || got != want {
+			t.Errorf("jump to %d: at %d with %+v, want %+v", step, j.VM.Now(), got, want)
+		}
+		// The jumped-to session replays on to the end, still identical.
+		if _, err := j.Replay(); err != nil {
+			t.Errorf("continuing after jump to %d: %v", step, err)
+		}
+		j.Close()
+	}
+}

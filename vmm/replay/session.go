@@ -13,6 +13,7 @@ import (
 	"github.com/ezekielelvis/rvsim/vmm/boot"
 	"github.com/ezekielelvis/rvsim/vmm/devices/virtio/blk"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
+	"github.com/ezekielelvis/rvsim/vmm/snapshot"
 	"github.com/ezekielelvis/rvsim/vmm/vm"
 )
 
@@ -48,6 +49,9 @@ type Session struct {
 	ckpts    []Record // replay: recorded checkpoints
 	next     int      // replay: next checkpoint to compare
 	end      *Record  // replay: the END record, if the recording has one
+
+	snapEvery uint64 // replay: save a snapshot every snapEvery steps
+	snapDir   string
 }
 
 // Divergence reports a replay whose state differs from the recording.
@@ -344,25 +348,27 @@ type Report struct {
 	Truncated   bool
 }
 
-// StartReplay prepares to replay the recording at path. Image paths come
-// from the recording unless spec overrides them; the images must match the
-// recorded hashes.
-func StartReplay(path string, spec Spec, console io.Writer) (*Session, error) {
+// openRecording reads a recording into a replay session (no VM yet) and
+// the VM configuration to replay it with.
+func openRecording(path string, spec Spec, console io.Writer) (*Session, vm.Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, vm.Config{}, err
 	}
 	h, recs, rerr := Read(f)
 	f.Close()
 	if rerr != nil && !errors.Is(rerr, ErrTruncated) {
-		return nil, rerr
+		return nil, vm.Config{}, rerr
 	}
 	if h.ABIVersion != machine.ABIVersion {
-		return nil, fmt.Errorf("replay: recorded with core ABI v%d, this rvsim has v%d", h.ABIVersion, machine.ABIVersion)
+		return nil, vm.Config{}, fmt.Errorf("replay: recorded with core ABI v%d, this rvsim has v%d", h.ABIVersion, machine.ABIVersion)
 	}
 	s := &Session{Header: h, replay: true, keepDisk: spec.KeepDisk}
 	if h.CoreBuild != machine.CoreBuild() {
 		s.Warnings = append(s.Warnings, fmt.Sprintf("recorded with core build %.12s, replaying with %.12s", h.CoreBuild, machine.CoreBuild()))
+	}
+	if rerr != nil {
+		s.Warnings = append(s.Warnings, "the recording is truncated; replaying up to its last complete record")
 	}
 	script := &vm.InputScript{Open: h.Input}
 	for i := range recs {
@@ -378,8 +384,20 @@ func StartReplay(path string, spec Spec, console io.Writer) (*Session, error) {
 			s.end = r
 		}
 	}
+	vcfg := vm.Config{Machine: h.Machine, Console: console, Replay: script, CheckpointEvery: h.CheckpointEvery,
+		Checkpoint: s.verify}
+	return s, vcfg, nil
+}
 
-	// Images: the recorded paths, unless overridden; contents must match.
+// StartReplay prepares to replay the recording at path. Image paths come
+// from the recording unless spec overrides them; the images must match the
+// recorded hashes.
+func StartReplay(path string, spec Spec, console io.Writer) (*Session, error) {
+	s, vcfg, err := openRecording(path, spec, console)
+	if err != nil {
+		return nil, err
+	}
+	h := s.Header
 	rspec := Spec{Bootargs: h.Bootargs, DiskReadOnly: h.Disk != nil && h.Disk.ReadOnly}
 	for _, role := range []struct {
 		name     string
@@ -411,17 +429,71 @@ func StartReplay(path string, spec Spec, console io.Writer) (*Session, error) {
 				filepath.Base(im.Path), im.SHA256, want.SHA256)
 		}
 	}
-
-	vcfg := vm.Config{Machine: h.Machine, Console: console, Replay: script, CheckpointEvery: h.CheckpointEvery}
 	if h.Disk != nil {
 		vcfg.Disk = diskConfig(h.Disk, l)
 	}
-	vcfg.Checkpoint = s.verify
 	if err := s.start(vcfg, l, func() error { return nil }); err != nil {
 		return nil, err
 	}
-	if rerr != nil {
-		s.Warnings = append(s.Warnings, "the recording is truncated; replaying up to its last complete record")
+	return s, nil
+}
+
+// JumpTo returns a replay of the recording at path stopped at step: it
+// restores the latest snapshot at or before step from snapDir (written by
+// SnapshotEvery) and replays forward, checking checkpoints on the way.
+// Without a usable snapshot it replays from the start.
+func JumpTo(path string, spec Spec, snapDir string, step uint64, console io.Writer) (*Session, error) {
+	best := uint64(0)
+	if entries, err := os.ReadDir(snapDir); err == nil {
+		for _, e := range entries {
+			var n uint64
+			if _, err := fmt.Sscanf(e.Name(), "%d.rvsnap", &n); err == nil && n <= step && n > best {
+				best = n
+			}
+		}
+	}
+	var s *Session
+	if best == 0 {
+		var err error
+		if s, err = StartReplay(path, spec, console); err != nil {
+			return nil, err
+		}
+	} else {
+		var vcfg vm.Config
+		var err error
+		if s, vcfg, err = openRecording(path, spec, console); err != nil {
+			return nil, err
+		}
+		snap, err := snapshot.LoadFile(filepath.Join(snapDir, fmt.Sprintf("%d.rvsnap", best)))
+		if err != nil {
+			return nil, err
+		}
+		diskPath := ""
+		if snap.Config.Disk != nil {
+			f, err := os.CreateTemp("", "rvsim-disk-*.img")
+			if err != nil {
+				return nil, err
+			}
+			diskPath = f.Name()
+			f.Close()
+		}
+		v, disk, err := snap.Restore(vcfg, diskPath)
+		if err != nil {
+			if diskPath != "" {
+				os.Remove(diskPath)
+			}
+			return nil, err
+		}
+		s.VM, s.disk, s.diskPath = v, disk, diskPath
+		for s.next < len(s.ckpts) && s.ckpts[s.next].Step <= best {
+			s.next++
+		}
+	}
+	if step > s.VM.Now() {
+		if _, err := s.VM.Run(step - s.VM.Now()); err != nil {
+			s.Close()
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -453,6 +525,32 @@ func (s *Session) verify(step uint64) error {
 	return nil
 }
 
+// SnapshotEvery makes Replay save a snapshot of the VM every n steps into
+// dir, as <step>.rvsnap, for JumpTo.
+func (s *Session) SnapshotEvery(n uint64, dir string) {
+	s.snapEvery, s.snapDir = n, dir
+}
+
+// run runs to step target, saving snapshots on the way if asked to.
+func (s *Session) run(target uint64) (vm.Result, error) {
+	for {
+		stop := target
+		if s.snapEvery != 0 {
+			stop = min(stop, (s.VM.Now()/s.snapEvery+1)*s.snapEvery)
+		}
+		res, err := s.VM.Run(stop - s.VM.Now())
+		if err != nil || res.Exited || res.Steps >= target {
+			return res, err
+		}
+		if s.snapEvery != 0 && res.Steps%s.snapEvery == 0 {
+			p := filepath.Join(s.snapDir, fmt.Sprintf("%d.rvsnap", res.Steps))
+			if err := snapshot.SaveFile(p, s.VM); err != nil {
+				return res, err
+			}
+		}
+	}
+}
+
 // Replay runs the whole recording, checking every checkpoint and the end.
 func (s *Session) Replay() (Report, error) {
 	var rep Report
@@ -469,7 +567,7 @@ func (s *Session) Replay() (Report, error) {
 	default:
 		return rep, errors.New("replay: the recording has no checkpoints and no end")
 	}
-	res, err := s.VM.Run(target - s.VM.Now())
+	res, err := s.run(target)
 	if err != nil {
 		return rep, err
 	}
