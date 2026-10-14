@@ -8,6 +8,7 @@
 #include "csr/csr.hpp"
 #include "decode/decode.hpp"
 #include "machine.hpp"
+#include "mmu/mmu.hpp"
 
 namespace rv {
 namespace {
@@ -176,15 +177,16 @@ void bump_counters(Csrs& c) {
 // changes; once rv_complete_mmio has supplied the result, re-executing the
 // instruction reaches the same access and consumes it. MMIO accesses must be
 // naturally aligned; other sizes and atomics raise access faults.
-Exception mmio_access(rv_machine* m, uint64_t addr, size_t size, bool is_store, uint64_t& value) {
+Exception mmio_access(rv_machine* m, uint64_t addr, uint64_t vaddr, size_t size, bool is_store,
+                      uint64_t& value) {
   auto& io = m->mmio;
-  if ((addr & (size - 1)) != 0) return raise(is_store ? kCauseStoreAccess : kCauseLoadAccess, addr);
+  if ((addr & (size - 1)) != 0) return raise(is_store ? kCauseStoreAccess : kCauseLoadAccess, vaddr);
   if (io.completed) {
     if (io.addr != addr || io.size != size || io.is_store != is_store) {
       return raise(kMmioExit, 1);  // re-execution diverged: an internal error
     }
     io.pending = io.completed = false;
-    if (io.fault) return raise(is_store ? kCauseStoreAccess : kCauseLoadAccess, addr);
+    if (io.fault) return raise(is_store ? kCauseStoreAccess : kCauseLoadAccess, vaddr);
     if (!is_store) value = io.value;
     return ok();
   }
@@ -197,20 +199,57 @@ Exception mmio_access(rv_machine* m, uint64_t addr, size_t size, bool is_store, 
   return raise(kMmioExit, 0);
 }
 
-template <typename T>
-Exception load(rv_machine* m, uint64_t addr, T& out) {
-  // Misaligned accesses trap unless configured otherwise (ADR-004, Unpriv §2.6).
-  if ((addr & (sizeof(T) - 1)) != 0 && (m->cfg.flags & RV_CFG_MISALIGNED_OK) == 0) {
-    return raise(kCauseMisalignedLoad, addr);
+constexpr uint64_t kPageSize = 4096;
+
+// Translates an access of `size` bytes at vaddr. An access that crosses a
+// page boundary (possible only with RV_CFG_MISALIGNED_OK) translates both
+// pages before anything is touched, so a fault leaves memory unchanged; it
+// must then lie in RAM, where it is performed byte by byte.
+struct Phys {
+  uint64_t first;
+  uint64_t second;  // the physical address of the byte at the page boundary
+  size_t split;     // bytes on the first page; == size when not split
+};
+
+Exception translate_access(rv_machine* m, uint64_t vaddr, size_t size, Access a, Phys& p) {
+  const Translation t = translate(m, vaddr, a);
+  if (!t.ok()) return raise(t.cause, vaddr);
+  p = {t.paddr, 0, size};
+  const uint64_t room = kPageSize - (vaddr & (kPageSize - 1));
+  if (room < size) {
+    const Translation u = translate(m, vaddr + room, a);
+    if (!u.ok()) return raise(u.cause, vaddr + room);
+    p.second = u.paddr;
+    p.split = room;
+    const uint64_t fault = a == Access::Store ? kCauseStoreAccess : kCauseLoadAccess;
+    if (!m->ram_contains(p.first, room) || !m->ram_contains(p.second, size - room)) return raise(fault, vaddr);
   }
+  return ok();
+}
+
+template <typename T>
+Exception load(rv_machine* m, uint64_t vaddr, T& out) {
+  // Misaligned accesses trap unless configured otherwise (ADR-004, Unpriv §2.6).
+  if ((vaddr & (sizeof(T) - 1)) != 0 && (m->cfg.flags & RV_CFG_MISALIGNED_OK) == 0) {
+    return raise(kCauseMisalignedLoad, vaddr);
+  }
+  Phys p;
+  if (Exception e = translate_access(m, vaddr, sizeof(T), Access::Load, p); e.raised()) return e;
+  if (p.split != sizeof(T)) {
+    auto* bytes = reinterpret_cast<uint8_t*>(&out);
+    std::memcpy(bytes, m->ram_ptr(p.first), p.split);
+    std::memcpy(bytes + p.split, m->ram_ptr(p.second), sizeof(T) - p.split);
+    return ok();
+  }
+  const uint64_t addr = p.first;
   if (m->ram_contains(addr, sizeof(T))) {
     std::memcpy(&out, m->ram_ptr(addr), sizeof(T));
     return ok();
   }
   uint64_t v = 0;
   if (m->clint_contains(addr, sizeof(T))) {
-    if (!clint_load(m, addr, sizeof(T), v)) return raise(kCauseLoadAccess, addr);
-  } else if (Exception e = mmio_access(m, addr, sizeof(T), false, v); e.raised()) {
+    if (!clint_load(m, addr, sizeof(T), v)) return raise(kCauseLoadAccess, vaddr);
+  } else if (Exception e = mmio_access(m, addr, vaddr, sizeof(T), false, v); e.raised()) {
     return e;
   }
   out = static_cast<T>(v);
@@ -234,30 +273,43 @@ void store_ram(rv_machine* m, uint64_t addr, T value) {
 }
 
 template <typename T>
-Exception store(rv_machine* m, uint64_t addr, T value) {
-  if ((addr & (sizeof(T) - 1)) != 0 && (m->cfg.flags & RV_CFG_MISALIGNED_OK) == 0) {
-    return raise(kCauseMisalignedStore, addr);
+Exception store(rv_machine* m, uint64_t vaddr, T value) {
+  if ((vaddr & (sizeof(T) - 1)) != 0 && (m->cfg.flags & RV_CFG_MISALIGNED_OK) == 0) {
+    return raise(kCauseMisalignedStore, vaddr);
   }
+  Phys p;
+  if (Exception e = translate_access(m, vaddr, sizeof(T), Access::Store, p); e.raised()) return e;
+  if (p.split != sizeof(T)) {
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+    std::memcpy(m->ram_ptr(p.first), bytes, p.split);
+    std::memcpy(m->ram_ptr(p.second), bytes + p.split, sizeof(T) - p.split);
+    return ok();
+  }
+  const uint64_t addr = p.first;
   if (m->ram_contains(addr, sizeof(T))) {
     store_ram(m, addr, value);
     return ok();
   }
   uint64_t v = static_cast<uint64_t>(value);
   if (m->clint_contains(addr, sizeof(T))) {
-    return clint_store(m, addr, sizeof(T), v) ? ok() : raise(kCauseStoreAccess, addr);
+    return clint_store(m, addr, sizeof(T), v) ? ok() : raise(kCauseStoreAccess, vaddr);
   }
-  return mmio_access(m, addr, sizeof(T), true, v);
+  return mmio_access(m, addr, vaddr, sizeof(T), true, v);
 }
 
 // Atomics require natural alignment regardless of RV_CFG_MISALIGNED_OK, and
-// only RAM supports them (Unpriv §14.2, §14.4; Priv §3.6.3). SC and AMOs
-// report faults as store/AMO exceptions; LR reports them as load exceptions.
+// only RAM supports them (Unpriv §14.2, §14.4; Priv §3.6.3). LR translates
+// and faults as a load; SC and AMOs as a store/AMO. On success paddr holds
+// the physical address.
 template <typename T>
-Exception check_atomic(const rv_machine* m, uint64_t addr, bool is_lr) {
-  if ((addr & (sizeof(T) - 1)) != 0) {
-    return raise(is_lr ? kCauseMisalignedLoad : kCauseMisalignedStore, addr);
+Exception check_atomic(rv_machine* m, uint64_t vaddr, bool is_lr, uint64_t& paddr) {
+  if ((vaddr & (sizeof(T) - 1)) != 0) {
+    return raise(is_lr ? kCauseMisalignedLoad : kCauseMisalignedStore, vaddr);
   }
-  if (!m->ram_contains(addr, sizeof(T))) return raise(is_lr ? kCauseLoadAccess : kCauseStoreAccess, addr);
+  const Translation t = translate(m, vaddr, is_lr ? Access::Load : Access::Store);
+  if (!t.ok()) return raise(t.cause, vaddr);
+  if (!m->ram_contains(t.paddr, sizeof(T))) return raise(is_lr ? kCauseLoadAccess : kCauseStoreAccess, vaddr);
+  paddr = t.paddr;
   return ok();
 }
 
@@ -462,10 +514,11 @@ class Executor {
   // LR (Unpriv §14.2): load and register a reservation on the address.
   template <typename T>
   Exception lr(uint64_t addr) {
-    if (Exception e = check_atomic<T>(m_, addr, true); e.raised()) return e;
+    uint64_t pa;
+    if (Exception e = check_atomic<T>(m_, addr, true, pa); e.raised()) return e;
     T v;
-    std::memcpy(&v, m_->ram_ptr(addr), sizeof(T));
-    m_->reservation = addr;
+    std::memcpy(&v, m_->ram_ptr(pa), sizeof(T));
+    m_->reservation = pa;
     wrs(static_cast<int64_t>(v));
     if constexpr (kTrace) {
       rec_.flags |= RV_TF_LOAD;
@@ -483,11 +536,12 @@ class Executor {
   // hart's store to the reservation set.
   template <typename T>
   Exception sc(uint64_t addr, uint64_t value) {
-    if (Exception e = check_atomic<T>(m_, addr, false); e.raised()) return e;
-    const bool success = m_->reservation == addr;
+    uint64_t pa;
+    if (Exception e = check_atomic<T>(m_, addr, false, pa); e.raised()) return e;
+    const bool success = m_->reservation == pa;
     m_->reservation = kNoReservation;
     if (success) {
-      store_ram(m_, addr, static_cast<T>(value));
+      store_ram(m_, pa, static_cast<T>(value));
       if constexpr (kTrace) {
         rec_.flags |= RV_TF_STORE;
         rec_.mem_addr = addr;
@@ -503,11 +557,12 @@ class Executor {
   // gets op(old, rs2).
   template <typename T, typename F>
   Exception amo(uint64_t addr, F op) {
-    if (Exception e = check_atomic<T>(m_, addr, false); e.raised()) return e;
+    uint64_t pa;
+    if (Exception e = check_atomic<T>(m_, addr, false, pa); e.raised()) return e;
     T old;
-    std::memcpy(&old, m_->ram_ptr(addr), sizeof(T));
+    std::memcpy(&old, m_->ram_ptr(pa), sizeof(T));
     const T updated = op(old);
-    store_ram(m_, addr, updated);
+    store_ram(m_, pa, updated);
     wrs(sizeof(T) == 4 ? sext32(old) : static_cast<int64_t>(old));
     if constexpr (kTrace) {
       rec_.flags |= RV_TF_LOAD | RV_TF_STORE;
@@ -602,11 +657,12 @@ class Executor {
   }
 
   // SFENCE.VMA (Priv §4.2.1, §3.1.6.5): illegal in U-mode, and in S-mode
-  // when mstatus.TVM is set; otherwise permitted. With no TLB yet it does
-  // nothing (ADR-016).
-  Exception sfence_vma() const {
+  // when mstatus.TVM is set. rs1 = x0 means all addresses; rs2 = x0 means
+  // all address spaces (and then global mappings are flushed too).
+  Exception sfence_vma() {
     if (h_.priv == kPrivU) return illegal();
     if (h_.priv == kPrivS && (h_.csr.mstatus & mstatus::kTVM) != 0) return illegal();
+    tlb_flush(m_, d_.rs1 != 0, h_.x[d_.rs1], d_.rs2 != 0, h_.x[d_.rs2] & 0xffff);
     return ok();
   }
 
@@ -649,18 +705,27 @@ Step step(rv_machine* m) {
   // bits (Unpriv §1.5). RAM is the only executable region. A fault on the
   // second parcel reports that parcel's address in mtval while mepc points
   // at the instruction (Priv §3.1.16).
-  if (!m->ram_contains(h.pc, 2)) return take_trap<kTrace>(m, raise(kCauseFetchAccess, h.pc), rec);
+  // Each parcel is translated on its own, so an instruction that straddles
+  // a page boundary can fault on its second page (Priv §4.3.2).
+  const Translation t0 = translate(m, h.pc, Access::Fetch);
+  if (!t0.ok()) return take_trap<kTrace>(m, raise(t0.cause, h.pc), rec);
+  if (!m->ram_contains(t0.paddr, 2)) return take_trap<kTrace>(m, raise(kCauseFetchAccess, h.pc), rec);
   uint16_t lo;
-  std::memcpy(&lo, m->ram_ptr(h.pc), 2);
+  std::memcpy(&lo, m->ram_ptr(t0.paddr), 2);
   Insn d;
   if ((lo & 3) != 3) {
     d = decode16(lo);
   } else {
-    if (!m->ram_contains(h.pc + 2, 2)) {
-      return take_trap<kTrace>(m, raise(kCauseFetchAccess, h.pc + 2), rec);
+    const uint64_t pc2 = h.pc + 2;
+    uint64_t pa2 = t0.paddr + 2;
+    if ((pc2 & (kPageSize - 1)) == 0) {
+      const Translation t1 = translate(m, pc2, Access::Fetch);
+      if (!t1.ok()) return take_trap<kTrace>(m, raise(t1.cause, pc2), rec);
+      pa2 = t1.paddr;
     }
+    if (!m->ram_contains(pa2, 2)) return take_trap<kTrace>(m, raise(kCauseFetchAccess, pc2), rec);
     uint16_t hi;
-    std::memcpy(&hi, m->ram_ptr(h.pc + 2), 2);
+    std::memcpy(&hi, m->ram_ptr(pa2), 2);
     d = decode32(static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 16));
   }
   if constexpr (kTrace) {
@@ -721,6 +786,7 @@ void reset_hart(rv_machine* m) {
   m->htif_halt = false;
   m->in_wfi = false;
   m->mmio = rv_machine::Mmio{};
+  for (TlbEntry& t : m->tlb) t = TlbEntry{};
   m->mtimecmp = 0;
   m->mtime_offset = 0;
   m->reservation = kNoReservation;

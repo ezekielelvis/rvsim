@@ -7,6 +7,7 @@
 #include "clint/clint.hpp"
 #include "csr/csr.hpp"
 #include "machine.hpp"
+#include "mmu/mmu.hpp"
 #include "rv.h"
 
 namespace {
@@ -200,9 +201,19 @@ const uint8_t* rv_ram_view(const rv_machine* m, uint64_t* size_out) {
   return m->ram;
 }
 
-int rv_translate(const rv_machine* m, uint64_t, uint32_t, uint64_t* paddr_out) {
+int rv_translate(const rv_machine* m, uint64_t vaddr, uint32_t access, uint64_t* paddr_out) {
   if (m == nullptr || paddr_out == nullptr) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+  rv::Access a;
+  switch (access) {
+    case RV_ACC_READ: a = rv::Access::Load; break;
+    case RV_ACC_WRITE: a = rv::Access::Store; break;
+    case RV_ACC_EXEC: a = rv::Access::Fetch; break;
+    default: return RV_E_INVAL;
+  }
+  const rv::Translation t = rv::translate_debug(m, vaddr, a);
+  if (!t.ok()) return RV_E_RANGE;  // the access would fault
+  *paddr_out = t.paddr;
+  return RV_OK;
 }
 
 int rv_add_breakpoint(rv_machine* m, uint64_t, uint64_t, uint32_t, uint32_t* id_out) {

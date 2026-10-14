@@ -30,6 +30,7 @@ add_library(rvcore STATIC
   src/cpu/execute.cpp
   src/csr/csr.cpp
   src/decode/decode.cpp
+  src/mmu/mmu.cpp
 )
 target_include_directories(rvcore
   PUBLIC include
@@ -67,6 +68,7 @@ if(RVSIM_BUILD_TESTS)
     tests/decode_test.cpp
     tests/header_c_test.c
     tests/memory_test.cpp
+    tests/mmu_test.cpp
     tests/mmio_test.cpp
     tests/muldiv_test.cpp
     tests/privileged_test.cpp

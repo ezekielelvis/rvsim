@@ -12,6 +12,16 @@
 // Guest memory is little-endian; loads and stores memcpy host words directly.
 static_assert(std::endian::native == std::endian::little, "big-endian hosts are not supported");
 
+// One TLB entry: a 4 KiB piece of a leaf mapping (mmu/mmu.cpp).
+struct TlbEntry {
+  bool valid = false;
+  uint8_t flags = 0;  // PTE bits 7:0 (V R W X U G A D)
+  uint8_t level = 0;  // 0: 4 KiB leaf, 1: 2 MiB, 2: 1 GiB
+  uint16_t asid = 0;
+  uint64_t vpn = 0;  // vaddr >> 12
+  uint64_t ppn = 0;  // physical page for this vpn
+};
+
 struct rv_machine {
   rv_config cfg{};
   rv_exit exit{};
@@ -30,6 +40,9 @@ struct rv_machine {
   // a write to mtime moves this offset.
   uint64_t mtimecmp = 0;
   uint64_t mtime_offset = 0;
+
+  // Sv39 TLB: direct-mapped by vpn.
+  TlbEntry tlb[256];
 
   // LR/SC reservation: the reserved physical address, or kNoReservation.
   uint64_t reservation = ~0ull;

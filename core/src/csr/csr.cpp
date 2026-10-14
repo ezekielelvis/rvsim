@@ -1,6 +1,7 @@
 #include "csr/csr.hpp"
 
 #include "machine.hpp"
+#include "mmu/mmu.hpp"
 
 namespace rv {
 namespace {
@@ -19,11 +20,11 @@ constexpr uint64_t kMstatusFixed = (2ull << kUXLShift) | (2ull << kSXLShift);
 
 // Delegable exceptions: everything that can occur except ECALL from M
 // (medeleg[11] is read-only zero, Priv §3.1.8) and misaligned fetch, which
-// cannot occur with IALIGN=16. Page faults join with the MMU.
+// cannot occur with IALIGN=16.
 constexpr uint64_t kMedelegWritable =
     bit(kCauseFetchAccess) | bit(kCauseIllegalInsn) | bit(kCauseBreakpoint) | bit(kCauseMisalignedLoad) |
     bit(kCauseLoadAccess) | bit(kCauseMisalignedStore) | bit(kCauseStoreAccess) | bit(kCauseEcallU) |
-    bit(kCauseEcallS);
+    bit(kCauseEcallS) | bit(kCauseFetchPageFault) | bit(kCauseLoadPageFault) | bit(kCauseStorePageFault);
 
 constexpr uint64_t kSupervisorIrqs = bit(kIrqSSI) | bit(kIrqSTI) | bit(kIrqSEI);
 constexpr uint64_t kAllIrqs = kSupervisorIrqs | bit(kIrqMSI) | bit(kIrqMTI) | bit(kIrqMEI);
@@ -88,7 +89,7 @@ bool csr_read(const rv_machine* m, uint16_t csr, uint64_t& out) {
     case csrno::kSie: out = c.mie & c.mideleg; return true;
     case csrno::kStvec: out = c.stvec; return true;
     case csrno::kScounteren: out = c.scounteren; return true;
-    case csrno::kSenvcfg: out = 0; return true;  // FIOM is read-only zero without an MMU
+    case csrno::kSenvcfg: out = c.senvcfg; return true;
     case csrno::kSscratch: out = c.sscratch; return true;
     case csrno::kSepc: out = c.sepc; return true;
     case csrno::kScause: out = c.scause; return true;
@@ -102,7 +103,7 @@ bool csr_read(const rv_machine* m, uint16_t csr, uint64_t& out) {
     case csrno::kMie: out = c.mie; return true;
     case csrno::kMtvec: out = c.mtvec; return true;
     case csrno::kMcounteren: out = c.mcounteren; return true;
-    case csrno::kMenvcfg: out = 0; return true;
+    case csrno::kMenvcfg: out = c.menvcfg; return true;
     case csrno::kMcountinhibit: out = c.mcountinhibit; return true;
     case csrno::kMscratch: out = c.mscratch; return true;
     // IALIGN=16 with C: only xepc[0] is zero (Priv §3.1.14).
@@ -135,7 +136,7 @@ bool csr_write(rv_machine* m, uint16_t csr, uint64_t v) {
       if ((v & 3) < 2) c.stvec = v;  // as mtvec
       return true;
     case csrno::kScounteren: c.scounteren = v & kCounterenWritable; return true;
-    case csrno::kSenvcfg: return true;
+    case csrno::kSenvcfg: c.senvcfg = v & kEnvcfgFIOM; return true;
     case csrno::kSscratch: c.sscratch = v; return true;
     case csrno::kSepc: c.sepc = v & ~1ull; return true;
     case csrno::kScause: c.scause = v; return true;
@@ -146,9 +147,20 @@ bool csr_write(rv_machine* m, uint16_t csr, uint64_t v) {
       c.mip = (c.mip & ~mask) | (v & mask);
       return true;
     }
-    // Without an MMU only Bare exists, and a write naming an unsupported mode
-    // has no effect at all (Priv §4.1.11).
-    case csrno::kSatp: return true;
+    // Bare and Sv39 are supported. A write naming another mode leaves MODE
+    // unchanged but still writes ASID and PPN, as Spike does (Priv §4.1.11
+    // makes MODE WARL). Changing satp flushes the TLB (Spike's behaviour; the
+    // spec requires an SFENCE.VMA, which is then redundant).
+    case csrno::kSatp: {
+      const uint64_t mode = v >> satp::kModeShift;
+      const bool valid = mode == satp::kModeBare || mode == satp::kModeSv39;
+      const uint64_t mode_mask = 0xfull << satp::kModeShift;
+      const uint64_t next = (valid ? (v & mode_mask) : (c.satp & mode_mask)) |
+                            (v & (satp::kAsidMask | satp::kPpnMask));
+      if (next != c.satp) tlb_flush(m, false, 0, false, 0);
+      c.satp = next;
+      return true;
+    }
     case csrno::kMstatus:
       c.mstatus = legalize_mpp((c.mstatus & ~kMstatusWritable) | (v & kMstatusWritable));
       return true;
@@ -162,7 +174,8 @@ bool csr_write(rv_machine* m, uint16_t csr, uint64_t v) {
       if ((v & 3) < 2) c.mtvec = v;
       return true;
     case csrno::kMcounteren: c.mcounteren = v & kCounterenWritable; return true;
-    case csrno::kMenvcfg: return true;
+    // FIOM, and ADUE (Svadu) to choose hardware A/D updates (ADR-025).
+    case csrno::kMenvcfg: c.menvcfg = v & (kEnvcfgFIOM | kMenvcfgADUE); return true;
     case csrno::kMcountinhibit: c.mcountinhibit = v & kCountinhibitWritable; return true;
     case csrno::kMscratch: c.mscratch = v; return true;
     case csrno::kMepc: c.mepc = v & ~1ull; return true;

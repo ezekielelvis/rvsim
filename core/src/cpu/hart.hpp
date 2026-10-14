@@ -20,6 +20,9 @@ enum Cause : uint64_t {
   kCauseEcallU = 8,
   kCauseEcallS = 9,
   kCauseEcallM = 11,
+  kCauseFetchPageFault = 12,
+  kCauseLoadPageFault = 13,
+  kCauseStorePageFault = 15,
 };
 
 constexpr uint64_t kInterruptBit = 1ull << 63;
@@ -75,6 +78,8 @@ struct Csrs {
   uint64_t mcounteren = 0;
   uint64_t scounteren = 0;
   uint64_t mcountinhibit = 0;
+  uint64_t menvcfg = 0;  // FIOM, ADUE
+  uint64_t senvcfg = 0;  // FIOM
   uint64_t mcycle = 0;
   uint64_t minstret = 0;
   // An explicit write to mcycle/minstret replaces that instruction's own

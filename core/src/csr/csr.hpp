@@ -54,11 +54,9 @@ constexpr uint64_t kMisa = (2ull << 62) | (1ull << ('A' - 'A')) | (1ull << ('C' 
                            (1ull << ('I' - 'A')) | (1ull << ('M' - 'A')) | (1ull << ('S' - 'A')) |
                            (1ull << ('U' - 'A'));
 
-// There is no MMU until Phase 5 (ADR-016): satp is read-only Bare, so
-// mstatus.SUM and menvcfg.FIOM are read-only zero (Priv §3.1.6.3 allows SUM
-// to be when satp.MODE is read-only zero). MXR and TVM stay writable: they
-// are only read-only zero when S-mode is absent (§3.1.6.3, §3.1.6.5).
-constexpr bool kHasMmu = false;
+// Sv39 is implemented (Phase 5), so SUM and menvcfg.FIOM are writable and
+// page faults are delegable. ADR-016 described the pre-MMU state.
+constexpr bool kHasMmu = true;
 
 // Whether an access from privilege `priv` is permitted, apart from whether
 // the CSR exists: the read-only and privilege bits of the address (Priv §2.1),
