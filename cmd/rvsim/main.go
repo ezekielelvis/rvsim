@@ -22,7 +22,9 @@ commands:
   boot      boot OpenSBI and a Linux kernel
   record    boot and record the session for replay
   replay    replay a recorded session and check it is identical
+  restore   resume a snapshot
   run       run a bare-metal ELF that exits through HTIF tohost
+  snapshot  boot to a given step and save the whole machine
   version   print the rvsim and core ABI versions
 
 Run "rvsim <command> -h" for command flags.
@@ -40,6 +42,10 @@ func main() {
 		os.Exit(recordCmd(os.Args[2:]))
 	case "replay":
 		os.Exit(replayCmd(os.Args[2:]))
+	case "restore":
+		os.Exit(restoreCmd(os.Args[2:]))
+	case "snapshot":
+		os.Exit(snapshotCmd(os.Args[2:]))
 	case "run":
 		os.Exit(runCmd(os.Args[2:]))
 	case "version":
@@ -199,6 +205,29 @@ func bootCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "rvsim: guest requested a reboot after %d steps; stopping\n", res.Steps)
 	}
 	return int(min(res.ExitCode, 255))
+}
+
+// copyDisk opens a private, temporary copy of a disk image.
+func copyDisk(path string, readOnly bool) (*blk.Config, func(), error) {
+	src, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer src.Close()
+	f, err := os.CreateTemp("", "rvsim-disk-*.img")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() { f.Close(); os.Remove(f.Name()) }
+	n, err := io.Copy(f, src)
+	if err == nil && n%blk.SectorSize != 0 {
+		err = fmt.Errorf("%s: size %d is not a multiple of %d bytes", path, n, blk.SectorSize)
+	}
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return &blk.Config{Disk: f, Size: uint64(n), ReadOnly: readOnly, Serial: "rvsim-disk0"}, cleanup, nil
 }
 
 // openDisk opens a disk image for a virtio block device.

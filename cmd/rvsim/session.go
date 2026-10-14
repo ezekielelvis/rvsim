@@ -140,6 +140,9 @@ func replayCmd(args []string) int {
 	tracePath := fs.String("trace", "", traceUsage)
 	traceFrom := fs.Uint64("trace-from", 0, "start tracing at step `n`")
 	quiet := fs.Bool("q", false, "do not print the guest's console output")
+	snapEvery := fs.Uint64("snapshot-every", 0, "save a snapshot every `n` steps into -snapshot-dir")
+	snapDir := fs.String("snapshot-dir", "", "`directory` of snapshots for -snapshot-every and -jump")
+	jump := fs.Uint64("jump", 0, "go to step `n` (restoring the nearest snapshot in -snapshot-dir),\nprint the state hashes there, and stop (or, with -trace, trace on from there)")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		fs.Usage()
@@ -150,7 +153,17 @@ func replayCmd(args []string) int {
 		console = io.Discard
 	}
 	spec := replay.Spec{Firmware: *firmware, Kernel: *kernel, Initrd: *initrd, Disk: *disk, KeepDisk: *keepDisk}
-	s, err := replay.StartReplay(fs.Arg(0), spec, console)
+	if *snapEvery != 0 && *snapDir == "" {
+		fs.Usage()
+		return 2
+	}
+	var s *replay.Session
+	var err error
+	if *jump != 0 {
+		s, err = replay.JumpTo(fs.Arg(0), spec, *snapDir, *jump, console)
+	} else {
+		s, err = replay.StartReplay(fs.Arg(0), spec, console)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rvsim:", err)
 		return 1
@@ -159,6 +172,23 @@ func replayCmd(args []string) int {
 	for _, w := range s.Warnings {
 		fmt.Fprintln(os.Stderr, "rvsim: warning:", w)
 	}
+	if *jump != 0 {
+		h, err := s.VM.StateHashes()
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Fprintf(os.Stderr, "rvsim: at step %d (%d instructions): core %016x ram %016x vmm %016x\n",
+			s.VM.Now(), s.VM.Instret(), h.Core, h.RAM, h.VMM)
+		if *tracePath == "" {
+			return 0
+		}
+	}
+	if *snapEvery != 0 {
+		if err := os.MkdirAll(*snapDir, 0o755); err != nil {
+			return fail(err)
+		}
+		s.SnapshotEvery(*snapEvery, *snapDir)
+	}
 	if *tracePath != "" {
 		trace, closeTrace, err := openTrace(*tracePath)
 		if err != nil {
@@ -166,8 +196,8 @@ func replayCmd(args []string) int {
 			return 1
 		}
 		defer closeTrace()
-		if *traceFrom > 0 {
-			if _, err := s.Run(*traceFrom); err != nil {
+		if *traceFrom > s.VM.Now() {
+			if _, err := s.Run(*traceFrom - s.VM.Now()); err != nil {
 				fmt.Fprintln(os.Stderr, "rvsim:", err)
 				return 1
 			}
