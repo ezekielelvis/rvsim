@@ -9,9 +9,10 @@ using namespace asm_;
 
 constexpr uint32_t kMstatus = 0x300, kMisa = 0x301, kMie = 0x304, kMtvec = 0x305;
 constexpr uint32_t kMscratch = 0x340, kMepc = 0x341, kMhartid = 0xf14;
-constexpr uint32_t kSatp = 0x180, kMedeleg = 0x302;
 constexpr uint64_t kMIE = 1u << 3, kMPIE = 1u << 7, kMPP = 3u << 11, kMPRV = 1u << 17;
 constexpr uint64_t kUXL64 = 2ull << 32;
+constexpr uint64_t kSXL64 = 2ull << 34;
+constexpr uint64_t kXL = kUXL64 | kSXL64;  // UXL = SXL = 64, read-only
 
 // Zicsr §9.1 read-modify-write semantics.
 TEST_F(Cpu, CsrInstructionsReturnOldValue) {
@@ -53,10 +54,10 @@ TEST_F(Cpu, CsrrsiWithNonZeroUimmToReadOnlyCsrIsIllegal) {
   expect_trap(2, insn, kRamBase);
 }
 
-// S-mode CSRs do not exist until Phase 3; neither do medeleg/mideleg
-// without S-mode (Priv §3.1.8).
+// Without PMP, debug triggers or AIA these CSRs do not exist (ADR-007).
 TEST_F(Cpu, UnimplementedCsrIsIllegal) {
-  for (uint32_t c : {kSatp, kMedeleg, 0x7a5u /* tcontrol */, 0x3b0u /* pmpaddr0 */}) {
+  for (uint32_t c : {0x7a5u /* tcontrol */, 0x7a0u /* tselect */, 0x3b0u /* pmpaddr0 */,
+                     0x309u /* mvip */, 0xc03u /* hpmcounter3: no Zihpm */}) {
     ASSERT_EQ(rv_reset(m), RV_OK);
     set_csr(kMtvec, kTrapVec);
     const uint32_t insn = csrrw(0, c, 0);
@@ -67,13 +68,19 @@ TEST_F(Cpu, UnimplementedCsrIsIllegal) {
 }
 
 TEST_F(Cpu, MstatusLegalization) {
-  // UXL reads as 2; SXL is zero without S-mode; MPP=S legalizes to U (Priv §3.1.6).
+  // Priv §3.1.6: UXL/SXL read 2. Without an MMU, SUM is read-only zero; MXR
+  // and TVM exist because S-mode does (ADR-016). FS exists with S-mode, and
+  // SD reflects FS=Dirty.
   program({csrrw(0, kMstatus, 1), csrrs(3, kMstatus, 0)});
   set_x(1, ~0ull);
   run(2);
-  EXPECT_EQ(x(3), kUXL64 | kMIE | kMPIE | kMPP | kMPRV | (1u << 21));
-  set_csr(kMstatus, 1u << 11);  // MPP = S
-  EXPECT_EQ(csr(kMstatus), kUXL64);
+  const uint64_t writable = (1u << 1) | (1u << 3) | (1u << 5) | (1u << 7) | (1u << 8) | (3u << 11) |
+                            (3u << 13) | (1u << 17) | (1u << 19) | (1u << 20) | (1u << 21) | (1u << 22);
+  EXPECT_EQ(x(3), kXL | writable | (1ull << 63));
+  set_csr(kMstatus, 2u << 11);  // MPP = 2 (reserved H) legalizes to U
+  EXPECT_EQ(csr(kMstatus), kXL);
+  set_csr(kMstatus, 1u << 11);  // MPP = S is legal
+  EXPECT_EQ(csr(kMstatus), kXL | (1u << 11));
 }
 
 TEST_F(Cpu, MisaIsReadOnly) {
@@ -85,12 +92,13 @@ TEST_F(Cpu, MisaIsReadOnly) {
 }
 
 TEST_F(Cpu, MtvecModeAndMepcAlignment) {
-  set_csr(kMtvec, kTrapVec | 3);  // reserved MODE 3 -> 1
+  set_csr(kMtvec, kTrapVec | 1);
+  set_csr(kMtvec, kRamBase | 3);  // reserved MODE: the write is ignored (ADR-018)
   EXPECT_EQ(csr(kMtvec), kTrapVec | 1);
   set_csr(kMepc, kRamBase | 3);
   EXPECT_EQ(csr(kMepc), kRamBase | 2);  // IALIGN=16: only bit 0 is zero
   set_csr(kMie, ~0ull);
-  EXPECT_EQ(csr(kMie), 0x888u);  // MSIE, MTIE, MEIE only
+  EXPECT_EQ(csr(kMie), 0xaaau);  // SSIE, MSIE, STIE, MTIE, SEIE, MEIE
 }
 
 TEST_F(Cpu, EcallFromMachineMode) {
@@ -112,7 +120,7 @@ TEST_F(Cpu, EcallFromUserModeAndMretBack) {
   EXPECT_EQ(priv(), 0u);
   EXPECT_EQ(pc(), kRamBase + 0x100);
   // Priv §3.3.2: MIE <- MPIE, MPIE <- 1, MPP <- U, MPRV <- 0 when leaving M.
-  EXPECT_EQ(csr(kMstatus), kUXL64 | kMIE | kMPIE);
+  EXPECT_EQ(csr(kMstatus), kXL | kMIE | kMPIE);
   run(1);
   expect_trap(8, 0, kRamBase + 0x100);
   EXPECT_EQ(csr(kMstatus) & kMPP, 0u);  // came from U
@@ -141,10 +149,9 @@ TEST_F(Cpu, PrivilegedInstructionsFromUserModeAreIllegal) {
   }
 }
 
-TEST_F(Cpu, NotYetImplementedInstructionsAreIllegal) {
-  // SRET and SFENCE.VMA need S-mode (Phase 3); all-zero and all-one
-  // encodings are defined illegal.
-  for (uint32_t insn : {kSret, 0x12000073u, 0u, ~0u}) {
+TEST_F(Cpu, DefinedIllegalEncodings) {
+  // All-zero and all-one encodings are defined illegal.
+  for (uint32_t insn : {0u, ~0u}) {
     ASSERT_EQ(rv_reset(m), RV_OK);
     set_csr(kMtvec, kTrapVec);
     program({insn});

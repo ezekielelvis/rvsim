@@ -224,7 +224,7 @@ TEST_F(Cpu, CompressedTraceRecordsSixteenBitInsn) {
 
 TEST_F(Cpu, MisaReportsImplementedExtensions) {
   const uint64_t ext = csr(0x301) & ((1u << 26) - 1);
-  EXPECT_EQ(ext, (1u << 0) | (1u << 2) | (1u << 8) | (1u << 12) | (1u << 20));  // A C I M U
+  EXPECT_EQ(ext, (1u << 0) | (1u << 2) | (1u << 8) | (1u << 12) | (1u << 18) | (1u << 20));  // A C I M S U
 }
 
 }  // namespace
