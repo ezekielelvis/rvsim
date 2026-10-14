@@ -7,7 +7,7 @@ JOBS       ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 GO         ?= go
 CMAKE      ?= cmake
 
-.PHONY: all core core-test go-build go-test lint test sanitize go-asan riscv-tests compliance difftest bench toolchain clean
+.PHONY: all core core-test go-build go-test lint test sanitize go-asan riscv-tests compliance difftest archtest-elfs archtest bench toolchain clean
 
 all: go-build
 
@@ -56,6 +56,14 @@ compliance: core riscv-tests
 ## difftest: compare commit logs against the pinned Spike, report the first divergence
 difftest: core riscv-tests
 	$(GO) test -count=1 ./tests/difftest
+
+## archtest-elfs: generate ACT4 (riscv-arch-test) ELFs with Sail for rvsim's config
+archtest-elfs:
+	tests/archtest/build-archtest.sh $(abspath $(BUILD))/archtest
+
+## archtest: run the generated ACT4 ELFs on rvsim
+archtest: core
+	$(GO) test -count=1 ./tests/archtest
 
 bench: core
 	$(GO) test -run '^$$' -bench . -benchmem ./...

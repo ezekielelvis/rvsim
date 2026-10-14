@@ -60,7 +60,7 @@ jobs:
         run: make go-asan
 
   compliance:
-    name: riscv-tests + Spike difftest
+    name: riscv-tests, ACT4 + Spike difftest
     runs-on: ubuntu-24.04
     env:
       RVSIM_REQUIRE_TESTS: "1"
@@ -74,9 +74,22 @@ jobs:
         with:
           path: ~/.cache/rvsim-tools
           key: spike-${{ runner.os }}-${{ hashFiles('scripts/toolchain.sh') }}
-      - name: Install toolchains and build Spike
-        run: scripts/toolchain.sh --install
+      - name: Install toolchains, Spike and Sail
+        run: |
+          scripts/toolchain.sh --install
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Compliance
         run: make compliance
       - name: Difftest against Spike
         run: make difftest
+      - name: Cache ACT4 ELFs
+        id: act4-cache
+        uses: actions/cache@v4
+        with:
+          path: build/archtest/rvsim-rv64imac/elfs
+          key: act4-${{ runner.os }}-${{ hashFiles('tests/archtest/rvsim-rv64imac/**', 'tests/archtest/build-archtest.sh') }}
+      - name: Generate ACT4 ELFs
+        if: steps.act4-cache.outputs.cache-hit != 'true'
+        run: make archtest-elfs
+      - name: Architecture tests (ACT4)
+        run: make archtest
