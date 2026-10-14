@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"sync/atomic"
 
+	"github.com/ezekielelvis/rvsim/vmm/fault"
 	"github.com/ezekielelvis/rvsim/vmm/replay"
 	"github.com/ezekielelvis/rvsim/vmm/vm"
 )
@@ -21,6 +22,7 @@ type imageFlags struct {
 	diskRO                         *bool
 	appendArgs                     *string
 	memMiB                         *uint64
+	faults                         *string
 }
 
 func addImageFlags(fs *flag.FlagSet) imageFlags {
@@ -32,7 +34,28 @@ func addImageFlags(fs *flag.FlagSet) imageFlags {
 		diskRO:     fs.Bool("disk-ro", false, "make the disk read-only"),
 		appendArgs: fs.String("append", "", "kernel command `line` (default \"console=ttyS0 earlycon\", plus\n\"root=/dev/vda rw\" with -disk and no -initrd)"),
 		memMiB:     fs.Uint64("mem", 256, "RAM size in `MiB`"),
+		faults:     fs.String("faults", "", "inject the faults in YAML `spec` (docs/FAULTS.md); each one applied is\nprinted to stderr"),
 	}
+}
+
+// faultSpec loads -faults, if given.
+func (f imageFlags) faultSpec() (*fault.Spec, error) {
+	if *f.faults == "" {
+		return nil, nil
+	}
+	return fault.Load(*f.faults)
+}
+
+// liveFaults returns an injector for -faults that prints each fault.
+func (f imageFlags) liveFaults() (*fault.Injector, error) {
+	s, err := f.faultSpec()
+	if s == nil || err != nil {
+		return nil, err
+	}
+	return fault.NewLive(s, func(a fault.Applied) error {
+		fmt.Fprintln(os.Stderr, "rvsim:", a)
+		return nil
+	}), nil
 }
 
 func (f imageFlags) bootargs() string {
@@ -79,6 +102,11 @@ func recordCmd(args []string) int {
 	}
 	spec := img.spec()
 	spec.CheckpointEvery, spec.KeepDisk = *every, *keepDisk
+	faults, err := img.faultSpec()
+	if err != nil {
+		return fail(err)
+	}
+	spec.Faults, spec.FaultLog = faults, prefixed{os.Stderr}
 
 	s, err := replay.StartRecording(spec, *out, os.Stdout, readInput(os.Stdin))
 	if err != nil {
@@ -156,7 +184,8 @@ func replayCmd(args []string) int {
 	if *quiet {
 		console = io.Discard
 	}
-	spec := replay.Spec{Firmware: *firmware, Kernel: *kernel, Initrd: *initrd, Disk: *disk, KeepDisk: *keepDisk}
+	spec := replay.Spec{Firmware: *firmware, Kernel: *kernel, Initrd: *initrd, Disk: *disk, KeepDisk: *keepDisk,
+		FaultLog: prefixed{os.Stderr}}
 	if *gdbAddr != "" {
 		return replayGDB(fs.Arg(0), *gdbAddr, spec, *verbose)
 	}
@@ -231,4 +260,14 @@ func replayCmd(args []string) int {
 	fmt.Fprintf(os.Stderr, "rvsim: replay identical: %d checkpoints, %d steps, %d instructions (%s)\n",
 		rep.Checkpoints, rep.Steps, rep.Instret, end)
 	return 0
+}
+
+// prefixed writes lines to w prefixed with "rvsim: ".
+type prefixed struct{ w io.Writer }
+
+func (p prefixed) Write(b []byte) (int, error) {
+	if _, err := fmt.Fprintf(p.w, "rvsim: %s", b); err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }

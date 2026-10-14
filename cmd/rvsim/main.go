@@ -173,6 +173,10 @@ func bootCmd(args []string) int {
 	cfg := machine.DefaultConfig()
 	cfg.RAMSize = *flags.memMiB << 20
 	vcfg := vm.Config{Machine: cfg, Console: os.Stdout, Input: readInput(os.Stdin), Trace: trace}
+	if vcfg.Faults, err = flags.liveFaults(); err != nil {
+		fmt.Fprintln(os.Stderr, "rvsim:", err)
+		return 1
+	}
 	if *flags.disk != "" {
 		d, closeDisk, err := openDisk(*flags.disk, *flags.diskRO)
 		if err != nil {

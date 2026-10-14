@@ -71,6 +71,11 @@ func gdbCmd(args []string) int {
 	cfg := machine.DefaultConfig()
 	cfg.RAMSize = *img.memMiB << 20
 	vcfg := vm.Config{Machine: cfg, Console: os.Stdout, Input: readInput(os.Stdin)}
+	faults, err := img.liveFaults()
+	if err != nil {
+		return fail(err)
+	}
+	vcfg.Faults = faults
 	if *img.disk != "" {
 		d, closeDisk, err := openDisk(*img.disk, *img.diskRO)
 		if err != nil {
