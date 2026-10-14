@@ -18,17 +18,21 @@ import (
 
 const usage = `usage: rvsim <command> [flags]
 
+rvsim is a deterministic RISC-V (RV64IMAC, Sv39) full-system emulator.
+
 commands:
+  run       run a bare-metal ELF that exits through HTIF tohost
   boot      boot OpenSBI and a Linux kernel
-  gdb       boot under a GDB remote stub
   record    boot and record the session for replay
   replay    replay a recorded session and check it is identical
-  restore   resume a snapshot
-  run       run a bare-metal ELF that exits through HTIF tohost
   snapshot  boot to a given step and save the whole machine
+  restore   resume a snapshot
+  gdb       boot under a GDB remote stub
+  trace     write a commit log of a window of a recorded session
+  fault     check a fault-injection spec, or list a recording's faults
   version   print the rvsim and core ABI versions
 
-Run "rvsim <command> -h" for command flags.
+Run "rvsim <command> -h" for command flags. Documentation: docs/.
 `
 
 func main() {
@@ -41,6 +45,10 @@ func main() {
 		os.Exit(bootCmd(os.Args[2:]))
 	case "gdb":
 		os.Exit(gdbCmd(os.Args[2:]))
+	case "trace":
+		os.Exit(traceCmd(os.Args[2:]))
+	case "fault":
+		os.Exit(faultCmd(os.Args[2:]))
 	case "record":
 		os.Exit(recordCmd(os.Args[2:]))
 	case "replay":
