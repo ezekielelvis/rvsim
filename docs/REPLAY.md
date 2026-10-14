@@ -40,6 +40,26 @@ Exit status 0 means every checkpoint and the final state matched:
 rvsim: replay identical: 178 checkpoints, 890185552 steps, 81301656 instructions (exit)
 ```
 
+## Snapshots and jumping to a step
+
+`rvsim snapshot -at N -o boot.rvsnap [boot flags]` boots to step N and
+saves the whole machine: core, RAM, devices, pending events and disk.
+`rvsim restore boot.rvsnap` resumes it interactively, exactly where it
+stopped (`-disk-out` keeps the disk).
+
+While replaying, `-snapshot-every K -snapshot-dir snaps/` saves a snapshot
+every K steps. With them, a replay can jump straight to step N:
+
+```sh
+rvsim replay -q -snapshot-every 100000000 -snapshot-dir snaps session.rvrec
+rvsim replay -q -jump 734000000 -snapshot-dir snaps session.rvrec
+# rvsim: at step 734000000 (…): core … ram … vmm …
+rvsim replay -q -jump 734000000 -snapshot-dir snaps -trace from-there.log session.rvrec
+```
+
+The jump restores the latest snapshot at or before N and replays forward,
+checking the recorded checkpoints on the way.
+
 ## Debugging a divergence
 
 When replay diverges, it reports:

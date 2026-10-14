@@ -83,6 +83,15 @@ events (ADR-027).
 linux` then boots them, runs commands at the BusyBox shell and powers off
 through the test finisher.
 
+## Determinism, replay and snapshots
+
+Everything that reaches the guest from outside is recorded with the step at
+which it arrived: UART input, end of input, and the images' hashes. A replay
+therefore reproduces the session exactly. Checkpoints compare XXH3 hashes of
+the core, RAM and VMM state every N steps (ADR-028; `docs/REPLAY.md`).
+Snapshots save the whole machine at a run-loop boundary, and restoring one
+continues exactly as the original would have (ADR-029).
+
 ## Boundary performance
 
 These numbers are a Phase 4 baseline. They were measured on an Apple Silicon

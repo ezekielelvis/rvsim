@@ -834,3 +834,76 @@ imprecise. The loop now advances `now` with the core; a test pins it.
 commands, a shell program, poweroff) with host-timed input and replays it 10
 times. It uploads the recording and images; a macOS job replays them 10
 times.
+
+---
+
+## ADR-029: Snapshots, restore and jump-to-step; idle pacing for live input
+
+**Status:** Accepted (Phase 9). The user authorized completing all phases;
+this snapshot format is listed for review in the final report.
+
+**Core snapshot** (`rv_core_snapshot_*`): `"RVCORE\0\0"`, then the format
+version, then the payload length, then the payload, then XXH3-64 of all of
+it. The payload is the field list `rv_state_hash` uses (`state.hpp`), so a
+hash and a snapshot can never disagree about what state is. Loading:
+- parses into a scratch machine first, so a damaged snapshot, or one from a
+  differently configured machine, leaves the target untouched;
+- is allowed on a poisoned machine, which it clears.
+
+**Machine snapshot** (`vmm/snapshot`, `.rvsnap`): `"RVSIMSNP"`, then
+version, then sections, then an XXH3-64 trailer.
+
+| Section | Contents |
+|---|---|
+| `CONF` | machine and disk configuration (JSON) |
+| `CORE` | the core blob |
+| `RAM ` | paged image |
+| `VMST` | devices by name, pending events by target name with the sequence counter, the run loop's input state (JSON) |
+| `DISK` | paged image, when there is a disk |
+
+A paged image is a bitmap of non-zero 4 KiB pages followed by those pages,
+flate-compressed (BestSpeed). A booted 256 MiB Linux machine snapshots to
+about 4–5 MiB. Disk contents are part of the machine: without them, a
+restore would diverge at the first disk read of something the guest had
+written.
+
+**When.** Snapshots are taken between `Run` calls, where the run loop is at a
+clean boundary: no MMIO access in flight, no held input. Restoring and
+calling `Run` is then exactly what the original process would have done
+next.
+
+**Restore rules:**
+- Checkpoints resume at the next multiple of the interval.
+- A replay resumes with the first recorded input after the snapshot's step;
+  input at that step was already delivered.
+- Whether host input is open belongs to the session: a VM restored with live
+  input starts open, one with neither input nor a script starts closed, and
+  a replay follows the snapshot.
+
+**Jump to step N.** `replay -snapshot-every K -snapshot-dir D` saves
+snapshots while replaying. `replay -jump N` restores the latest one at or
+before N and replays forward, checking checkpoints, so it reaches the same
+state a full replay would (tested against full replays). Snapshots carry no
+recording ID; a mismatched snapshot shows up as a divergence at the next
+checkpoint.
+
+**Acceptance.** Linux, booting from an initramfs and from an ext4 disk, is
+snapshotted mid-boot at step 40,000,001 (between checkpoints), saved to a
+file, and restored into a fresh VM. All 292 later checkpoints, the final
+state and the console output match an uninterrupted boot.
+
+**Idle pacing with live input** (amends ADR-023 and ADR-028). Linux idle at
+a shell may have no timer due for a long time, and the run loop
+fast-forwards idle time. Interactively, virtual time leapt billions of steps
+while the user typed, so guest uptime was absurd and `-max-steps` ran out
+before any input arrived. Found while testing `rvsim restore`. Now, while
+live host input is attached, idle time is paced to the host clock at
+`IdleStepsPerSecond` (100 M/s, the nominal rate of the 10 MHz timebase):
+
+- a byte that arrives early cuts the wait short;
+- time advances only by what elapsed;
+- the byte is held for the next boundary.
+
+The wall clock still only decides when live input arrives, which the
+recording captures. Replays, scheduled input and runs without live input
+never consult it.
