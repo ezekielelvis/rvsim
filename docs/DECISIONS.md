@@ -744,3 +744,93 @@ boot -disk rootfs.ext4` boots with `root=/dev/vda rw` when no initramfs is
 given. The image build now checks every line of `linux.config` against the
 resolved kernel configuration, as it already did for the Buildroot
 defconfig.
+
+---
+
+## ADR-028: Determinism audit, state hashes and record/replay
+
+**Status:** Accepted (Phase 8). The user approved the log format and
+step-based checkpoints.
+
+**Sources of nondeterminism that enter the guest** (audit, Phase 8):
+
+1. UART input: its content and the step it is delivered.
+2. The disk image's initial contents. Guest writes change it, so sessions
+   run on a private copy.
+3. Firmware, kernel, initramfs and DTB contents, plus the machine and VM
+   configuration.
+4. When host input ends (EOF). After EOF an idle hart is an error rather
+   than waiting.
+5. Host disk I/O errors. The device reports them to the guest as IOERR.
+6. The core build.
+
+Neither the core nor the VMM reads the clock or random numbers, and no
+guest-visible output depends on map iteration order. `mtime` derives from
+the step count, there is no RTC, and the scheduler breaks ties at the same
+step in scheduling order.
+
+**State hashes.** `rv_state_hash` is XXH3-64 (vendored xxHash v0.8.3) over a
+canonical serialization: `core/src/state/state.hpp`, versioned
+`kCoreFormat`. It covers:
+
+- config, registers and every CSR;
+- the step and instret counters and CLINT state;
+- the TLB, with invalid entries hashed as zeros;
+- the LR/SC reservation, interrupt inputs, any in-flight MMIO access, and
+  the WFI, poisoned and halt flags.
+
+RAM is hashed separately, as raw bytes. The same field list will serve core
+snapshots (Phase 9). The VMM hash (`vm.VMMHash`, pure-Go XXH3, checked
+against the C hash in a test) covers:
+
+- device snapshots;
+- pending scheduler events with their target names;
+- the scheduler's sequence counter;
+- the VM's input queue and state.
+
+**Recording format** (`vmm/replay`, `.rvrec`): see `docs/REPLAY.md`. It is a
+JSON header (config, image SHA-256s, core build) followed by records
+`tag · Δstep · len · payload`:
+
+| Tag | Record |
+|---|---|
+| `0x01` | INPUT |
+| `0x02` | INPUT_EOF |
+| `0x03` | CHECKPOINT: instret and the core, RAM and VMM hashes |
+| `0x04` | END |
+| `0x10–0x1f` | reserved for faults |
+
+Checkpoints fall every N **steps** (default 10 M); each records `instret`.
+Records are flushed as written.
+
+**Where input enters (the invariant replay depends on).** Live host input
+is delivered only at a run-loop boundary, after the due events and the
+checkpoint for that step, and:
+
+- never while an MMIO access is completed but not retired, since replay
+  could not stop there by step count. With live input attached, the run
+  loop retires such an instruction with a one-step run, so a guest polling
+  a device still yields clean boundaries;
+- at most once per step;
+- never inside `idle()`: a byte read while waiting is held and delivered at
+  the next boundary.
+
+Replay stops the run loop at each recorded step (as a deadline) and delivers
+the input at the same point. Two divergences found while building this, a
+checkpoint taken before versus after input at the same step and an MMIO-time
+delivery, led to these rules.
+
+**Disks** are copied for both record and replay, so the original stays the
+pristine input whose hash replay checks (`-keep-disk` saves the result).
+Images whose hashes differ are refused. A different core build only warns.
+
+**Fixed along the way (Phase 4 bug).** `idle()` advanced the core's time
+without updating the run loop's `now`. After a timer woke the hart, the next
+budget was computed from the stale step, and the core ran past the loop's
+deadlines (events, and now checkpoints). That was deterministic but
+imprecise. The loop now advances `now` with the core; a test pins it.
+
+**CI.** The Linux job records an interactive session (boot from ext4, typed
+commands, a shell program, poweroff) with host-timed input and replays it 10
+times. It uploads the recording and images; a macOS job replays them 10
+times.
