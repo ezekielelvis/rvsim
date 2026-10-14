@@ -48,14 +48,16 @@ func runCmd(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), "usage: rvsim run [flags] program.elf\n\n"+
-			"Runs a bare-metal RV64 ELF that communicates through HTIF tohost: console\n"+
-			"output goes to stdout, and the exit status is the program's exit code\n"+
+			"Runs a bare-metal RV64 ELF on the rvsim platform (CLINT, PLIC, UART at\n"+
+			"0x1000_0000). UART and HTIF console output go to stdout; the program\n"+
+			"exits through HTIF tohost, and the exit status is its exit code\n"+
 			"(tohost>>1), or 1 on an emulator error.\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	tracePath := fs.String("trace", "", "write a Spike --log-commits style commit log to `file` (- for stdout)")
 	maxSteps := fs.Uint64("max-steps", 100_000_000, "stop with an error after `n` steps")
 	misaligned := fs.Bool("misaligned", false, "perform misaligned loads/stores instead of trapping")
+	stdin := fs.Bool("stdin", false, "feed standard input to the guest's UART")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		fs.Usage()
@@ -63,6 +65,9 @@ func runCmd(args []string) int {
 	}
 
 	opt := baremetal.Options{MaxSteps: *maxSteps, Flags: machine.DefaultConfig().Flags, Console: os.Stdout}
+	if *stdin {
+		opt.Input = readInput(os.Stdin)
+	}
 	if *misaligned {
 		opt.Flags |= machine.FlagMisalignedOK
 	}
@@ -91,4 +96,24 @@ func runCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "rvsim: program exited with code %d after %d instructions\n", res.ExitCode, res.Instret)
 	}
 	return int(min(res.ExitCode, 255))
+}
+
+// readInput copies r into a channel byte by byte. The run loop alone decides
+// when each byte reaches the guest; this goroutine never touches the VM.
+func readInput(r io.Reader) <-chan byte {
+	ch := make(chan byte, 4096)
+	go func() {
+		defer close(ch)
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			for _, b := range buf[:n] {
+				ch <- b
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return ch
 }
