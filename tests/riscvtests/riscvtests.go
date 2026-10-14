@@ -25,7 +25,7 @@ type Test struct {
 
 // baseISA is what rvsim implements in the current phase.
 const (
-	baseISA  = "rv64i_zicsr_zifencei"
+	baseISA  = "rv64imac_zicsr_zifencei"
 	basePriv = "MU"
 )
 

@@ -41,12 +41,32 @@ func orEOF(s string) string {
 	return s
 }
 
-// Compare reads both logs and returns the first divergence, or nil if every
-// line of ours matches Spike. Spike lines before the first commit at or
-// above startPC (its boot ROM) are skipped. Spike keeps running after the
-// HTIF exit store until it polls tohost, so its extra trailing lines are
-// ignored.
-func Compare(ours, spike io.Reader, startPC uint64) (*Divergence, error) {
+// Result is the outcome of Compare.
+type Result struct {
+	Divergence *Divergence // nil if the logs agree
+	Commits    int         // rvsim commits compared
+	// SpuriousSC counts store-conditionals that failed in Spike but
+	// succeeded in rvsim and were resynchronized (see Compare).
+	SpuriousSC int
+}
+
+// maxResync bounds how far ahead Compare looks in Spike's log after a
+// spurious SC failure. Spike's retry is one LR/SC loop iteration.
+const maxResync = 16
+
+// Compare reads both logs and reports the first divergence. Spike lines
+// before the first commit at or above startPC (its boot ROM) are skipped.
+// Spike keeps running after the HTIF exit store until it polls tohost, so
+// its extra trailing lines are ignored.
+//
+// One non-architectural difference is tolerated: Spike drops the LR
+// reservation at the end of each scheduling quantum (sim_t::step, every
+// 5000 steps or at a trap), so an SC can fail in Spike where rvsim's
+// succeeds. Both are legal (Unpriv §14.2 lets an SC fail for
+// implementation-specific reasons). When Spike's SC fails at the same pc
+// where rvsim's succeeded, Compare skips Spike's retry lines until the logs
+// agree again, and counts it in Result.SpuriousSC.
+func Compare(ours, spike io.Reader, startPC uint64) (Result, error) {
 	oursSc := bufio.NewScanner(ours)
 	spikeSc := bufio.NewScanner(spike)
 	oursSc.Buffer(make([]byte, 64<<10), 1<<20)
@@ -74,13 +94,23 @@ func Compare(ours, spike io.Reader, startPC uint64) (*Divergence, error) {
 		return false
 	}
 
+	var res Result
 	var ctx []string
-	line := 0
 	for oursSc.Scan() {
-		line++
+		res.Commits++
 		our := oursSc.Text()
-		if !nextSpike() || our != spikeLine {
-			return &Divergence{Line: line, Ours: our, Spike: spikeLine, Context: ctx}, nil
+		ok := nextSpike()
+		if ok && our != spikeLine && spuriousSCFailure(our, spikeLine) {
+			for i := 0; i < maxResync && ok && our != spikeLine; i++ {
+				ok = nextSpike()
+			}
+			if ok && our == spikeLine {
+				res.SpuriousSC++
+			}
+		}
+		if !ok || our != spikeLine {
+			res.Divergence = &Divergence{Line: res.Commits, Ours: our, Spike: spikeLine, Context: ctx}
+			return res, nil
 		}
 		ctx = append(ctx, our)
 		if len(ctx) > ContextLines {
@@ -88,9 +118,23 @@ func Compare(ours, spike io.Reader, startPC uint64) (*Divergence, error) {
 		}
 	}
 	if err := oursSc.Err(); err != nil {
-		return nil, err
+		return res, err
 	}
-	return nil, spikeSc.Err()
+	return res, spikeSc.Err()
+}
+
+// spuriousSCFailure reports whether spike's line is a failed SC (rd = 1, no
+// store) at the same pc and encoding as our line, which is an SC.
+func spuriousSCFailure(our, spike string) bool {
+	o, s := strings.Fields(our), strings.Fields(spike)
+	if len(o) < 5 || len(s) != 7 || o[3] != s[3] || o[4] != s[4] {
+		return false
+	}
+	insn, err := strconv.ParseUint(strings.Trim(s[4], "()"), 0, 32)
+	if err != nil || insn&0x7f != 0b0101111 || insn>>27 != 0b00011 {
+		return false
+	}
+	return s[6] == "0x0000000000000001"
 }
 
 // commitPC extracts the pc from "core   0: 3 0x0000000080000000 (...".
