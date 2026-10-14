@@ -44,8 +44,9 @@ func runCmd(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), "usage: rvsim run [flags] program.elf\n\n"+
-			"Runs a bare-metal RV64 ELF until it writes HTIF tohost. The exit status\n"+
-			"is the program's exit code (tohost>>1), or 1 on an emulator error.\n\nflags:\n")
+			"Runs a bare-metal RV64 ELF that communicates through HTIF tohost: console\n"+
+			"output goes to stdout, and the exit status is the program's exit code\n"+
+			"(tohost>>1), or 1 on an emulator error.\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	tracePath := fs.String("trace", "", "write a Spike --log-commits style commit log to `file` (- for stdout)")
@@ -57,7 +58,7 @@ func runCmd(args []string) int {
 		return 2
 	}
 
-	opt := baremetal.Options{MaxSteps: *maxSteps, Flags: machine.DefaultConfig().Flags}
+	opt := baremetal.Options{MaxSteps: *maxSteps, Flags: machine.DefaultConfig().Flags, Console: os.Stdout}
 	if *misaligned {
 		opt.Flags |= machine.FlagMisalignedOK
 	}

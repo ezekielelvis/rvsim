@@ -117,37 +117,57 @@ TEST_F(CpuMisalignedOK, MisalignedAccessesComplete) {
   EXPECT_EQ(x(3), 0x33445566u);
 }
 
-TEST_F(Cpu, StoreToToHostHalts) {
-  program({store(2, 2, 1, 0), kNop});
+// ADR-013: HTIF latches a command when a store writes tohost's top byte.
+TEST_F(Cpu, ToHostLatchesWhenHighWordIsWritten) {
+  // riscv-tests: sw low word (1), then sw high word (0).
+  program({store(2, 2, 1, 0), store(2, 0, 1, 4), kNop});
   set_x(1, kToHost);
   set_x(2, 1);
   const rv_exit& e = run(100);
   EXPECT_EQ(e.reason, RV_EXIT_HALT);
   EXPECT_EQ(e.addr, kToHost);
   EXPECT_EQ(e.value, 1u);
-  EXPECT_EQ(e.pc, kRamBase + 4);  // the store retired
-  EXPECT_EQ(e.instret, 1u);
+  EXPECT_EQ(e.pc, kRamBase + 8);  // both stores retired
+  EXPECT_EQ(e.instret, 2u);
 }
 
-TEST_F(Cpu, StoreToUpperHalfOfToHostHalts) {
-  program({store(2, 2, 1, 4)});  // sw to tohost+4
+TEST_F(Cpu, LowWordAloneDoesNotLatch) {
+  // The low half of a console command (a character) must not be acted on.
+  program({store(2, 2, 1, 0), kNop});
   set_x(1, kToHost);
-  set_x(2, 3);
-  EXPECT_EQ(run(10).reason, RV_EXIT_HALT);
-  EXPECT_EQ(rv_exit_info(m)->value, 3ull << 32);
-}
-
-TEST_F(Cpu, StoreNextToToHostDoesNotHalt) {
-  set_mem<uint64_t>(kToHost, 1);  // tohost already non-zero, but this store misses it
-  program({store(3, 2, 1, -8), store(3, 2, 1, 8)});
-  set_x(1, kToHost);
-  set_x(2, 1);
+  set_x(2, 'A');
   EXPECT_EQ(run(2).reason, RV_EXIT_BUDGET);
+}
+
+TEST_F(Cpu, DoublewordStoreToToHostLatches) {
+  program({store(3, 2, 1, 0)});
+  set_x(1, kToHost);
+  set_x(2, 0x0101'0000'0000'0041);  // console putchar 'A'
+  const rv_exit& e = run(10);
+  EXPECT_EQ(e.reason, RV_EXIT_HALT);
+  EXPECT_EQ(e.value, 0x0101'0000'0000'0041u);
+}
+
+TEST_F(Cpu, ByteStoreToTopOfToHostLatches) {
+  set_mem<uint64_t>(kToHost, 5);
+  program({store(0, 0, 1, 7)});  // sb zero, 7(tohost): writes the top byte
+  set_x(1, kToHost);
+  const rv_exit& e = run(10);
+  EXPECT_EQ(e.reason, RV_EXIT_HALT);
+  EXPECT_EQ(e.value, 5u);
 }
 
 TEST_F(Cpu, StoringZeroToToHostDoesNotHalt) {
   program({store(3, 0, 1, 0), kNop});
   set_x(1, kToHost);
+  EXPECT_EQ(run(2).reason, RV_EXIT_BUDGET);
+}
+
+TEST_F(Cpu, StoreNextToToHostDoesNotHalt) {
+  set_mem<uint64_t>(kToHost, 1);  // tohost already non-zero, but these stores miss it
+  program({store(3, 2, 1, -8), store(3, 2, 1, 8)});
+  set_x(1, kToHost);
+  set_x(2, 1);
   EXPECT_EQ(run(2).reason, RV_EXIT_BUDGET);
 }
 
