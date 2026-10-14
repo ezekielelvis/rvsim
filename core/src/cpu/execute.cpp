@@ -4,6 +4,7 @@
 #include <cstring>
 #include <limits>
 
+#include "clint/clint.hpp"
 #include "csr/csr.hpp"
 #include "decode/decode.hpp"
 #include "machine.hpp"
@@ -65,35 +66,51 @@ void emit(rv_machine* m, const rv_trace_record& rec) {
   if constexpr (kTrace) m->trace[m->trace_len++] = rec;
 }
 
-// Trap entry into M-mode (Priv §3.1.6.1, §3.1.7, §3.1.14-16). Delegation to
-// S-mode arrives with S-mode in Phase 3.
+// Trap entry (Priv §3.1.6.1, §3.1.7, §3.1.8, §3.1.14-16, §4.1.1). A trap
+// from S- or U-mode whose cause is delegated in medeleg/mideleg goes to
+// S-mode; everything else, and every trap taken in M-mode, goes to M-mode.
 template <bool kTrace>
 Step take_trap(rv_machine* m, Exception e, rv_trace_record& rec) {
   Hart& h = m->hart;
   Csrs& c = h.csr;
   const Priv from = h.priv;
+  const bool interrupt = (e.cause & kInterruptBit) != 0;
+  const uint64_t code = e.cause & ~kInterruptBit;
+  const uint64_t deleg = interrupt ? c.mideleg : c.medeleg;
+  const bool to_s = from <= kPrivS && code < 64 && ((deleg >> code) & 1) != 0;
 
-  c.mepc = h.pc & ~1ull;
-  c.mcause = e.cause;
-  c.mtval = e.tval;
   uint64_t s = c.mstatus;
-  s = (s & ~mstatus::kMPIE) | ((s & mstatus::kMIE) ? mstatus::kMPIE : 0);
-  s &= ~mstatus::kMIE;
-  s = (s & ~mstatus::kMPP) | (static_cast<uint64_t>(from) << mstatus::kMPPShift);
+  uint64_t tvec;
+  if (to_s) {
+    c.sepc = h.pc & ~1ull;
+    c.scause = e.cause;
+    c.stval = e.tval;
+    s = (s & ~mstatus::kSPIE) | ((s & mstatus::kSIE) ? mstatus::kSPIE : 0);
+    s &= ~mstatus::kSIE;
+    s = (s & ~mstatus::kSPP) | (from == kPrivS ? mstatus::kSPP : 0);
+    h.priv = kPrivS;
+    tvec = c.stvec;
+  } else {
+    c.mepc = h.pc & ~1ull;
+    c.mcause = e.cause;
+    c.mtval = e.tval;
+    s = (s & ~mstatus::kMPIE) | ((s & mstatus::kMIE) ? mstatus::kMPIE : 0);
+    s &= ~mstatus::kMIE;
+    s = (s & ~mstatus::kMPP) | (static_cast<uint64_t>(from) << mstatus::kMPPShift);
+    h.priv = kPrivM;
+    tvec = c.mtvec;
+  }
   c.mstatus = s;
-  h.priv = kPrivM;
-
-  const uint64_t base = c.mtvec & ~3ull;
-  const bool interrupt = (e.cause >> 63) != 0;
   // Vectored mode offsets only asynchronous interrupts (Priv §3.1.7).
-  h.pc = ((c.mtvec & 1) && interrupt) ? base + 4 * (e.cause & ~(1ull << 63)) : base;
+  const uint64_t base = tvec & ~3ull;
+  h.pc = ((tvec & 1) && interrupt) ? base + 4 * code : base;
 
   m->steps++;
   if constexpr (kTrace) {
     rec.kind = RV_TRACE_TRAP;
     rec.priv = from;
     rec.flags = 0;
-    rec.rd = kPrivM;
+    rec.rd = h.priv;
     rec.rd_value = e.cause;
     rec.csr_value = h.pc;
     rec.mem_addr = e.tval;
@@ -102,15 +119,71 @@ Step take_trap(rv_machine* m, Exception e, rv_trace_record& rec) {
   return Step::Trapped;
 }
 
+// The interrupt to take before the next instruction, or 0 (Priv §3.1.9).
+// M-level (undelegated) interrupts are taken in any mode below M, or in M
+// with mstatus.MIE set. Delegated interrupts are taken below S, or in S with
+// sstatus.SIE set, and never in M. Higher-privilege interrupts go first;
+// within a level the order is MEI, MSI, MTI, SEI, SSI, STI.
+uint64_t pending_interrupt(const rv_machine* m) {
+  const Hart& h = m->hart;
+  const Csrs& c = h.csr;
+  const uint64_t pend = mip_effective(m) & c.mie & ~m->irq_suppress;
+  if (pend == 0) return 0;
+  const uint64_t m_pend = pend & ~c.mideleg;
+  const uint64_t s_pend = pend & c.mideleg;
+  const bool m_enabled = h.priv < kPrivM || (c.mstatus & mstatus::kMIE) != 0;
+  const bool s_enabled = h.priv < kPrivS || (h.priv == kPrivS && (c.mstatus & mstatus::kSIE) != 0);
+  uint64_t take = 0;
+  if (m_enabled && m_pend != 0) {
+    take = m_pend;
+  } else if (s_enabled && s_pend != 0) {
+    take = s_pend;
+  } else {
+    return 0;
+  }
+  for (Irq irq : {kIrqMEI, kIrqMSI, kIrqMTI, kIrqSEI, kIrqSSI, kIrqSTI}) {
+    if (take & (1ull << irq)) return kInterruptBit | irq;
+  }
+  return 0;
+}
+
+// Priv §3.3.3: a waiting hart resumes when any interrupt is pending and
+// enabled in mie, regardless of the global enables and delegation.
+bool wfi_wakeup(const rv_machine* m) {
+  return (mip_effective(m) & m->hart.csr.mie & ~m->irq_suppress) != 0;
+}
+
+// Counters advance once per retired instruction (Spike's CPI = 1 model,
+// ADR-015) unless inhibited, and an explicit write replaces the increment.
+void bump_counters(Csrs& c) {
+  if (c.mcycle_written) {
+    c.mcycle_written = false;
+  } else if ((c.mcountinhibit & 1) == 0) {
+    c.mcycle++;
+  }
+  if (c.minstret_written) {
+    c.minstret_written = false;
+  } else if ((c.mcountinhibit & 4) == 0) {
+    c.minstret++;
+  }
+}
+
 template <typename T>
 Exception load(rv_machine* m, uint64_t addr, T& out) {
   // Misaligned accesses trap unless configured otherwise (ADR-004, Unpriv §2.6).
   if ((addr & (sizeof(T) - 1)) != 0 && (m->cfg.flags & RV_CFG_MISALIGNED_OK) == 0) {
     return raise(kCauseMisalignedLoad, addr);
   }
-  if (!m->ram_contains(addr, sizeof(T))) return raise(kCauseLoadAccess, addr);
-  std::memcpy(&out, m->ram_ptr(addr), sizeof(T));
-  return ok();
+  if (m->ram_contains(addr, sizeof(T))) {
+    std::memcpy(&out, m->ram_ptr(addr), sizeof(T));
+    return ok();
+  }
+  uint64_t v;
+  if (m->clint_contains(addr, sizeof(T)) && clint_load(m, addr, sizeof(T), v)) {
+    out = static_cast<T>(v);
+    return ok();
+  }
+  return raise(kCauseLoadAccess, addr);
 }
 
 // Writes RAM that has already been checked, then applies HTIF (ADR-013): a
@@ -134,9 +207,14 @@ Exception store(rv_machine* m, uint64_t addr, T value) {
   if ((addr & (sizeof(T) - 1)) != 0 && (m->cfg.flags & RV_CFG_MISALIGNED_OK) == 0) {
     return raise(kCauseMisalignedStore, addr);
   }
-  if (!m->ram_contains(addr, sizeof(T))) return raise(kCauseStoreAccess, addr);
-  store_ram(m, addr, value);
-  return ok();
+  if (m->ram_contains(addr, sizeof(T))) {
+    store_ram(m, addr, value);
+    return ok();
+  }
+  if (m->clint_contains(addr, sizeof(T)) && clint_store(m, addr, sizeof(T), static_cast<uint64_t>(value))) {
+    return ok();
+  }
+  return raise(kCauseStoreAccess, addr);
 }
 
 // Atomics require natural alignment regardless of RV_CFG_MISALIGNED_OK, and
@@ -285,12 +363,9 @@ class Executor {
       case Op::Csrrsi:
       case Op::Csrrci: return csr();
       case Op::Mret: return mret();
-      case Op::Wfi:
-        // Priv §3.3.3: WFI may complete immediately. Spike makes it illegal in
-        // U-mode; we match. Idle exits (RV_EXIT_WFI) arrive in Phase 3.
-        return h_.priv == kPrivU ? illegal() : ok();
-      case Op::Sret:       // no S-mode yet
-      case Op::SfenceVma:  // no S-mode yet
+      case Op::Sret: return sret();
+      case Op::Wfi: return wfi();
+      case Op::SfenceVma: return sfence_vma();
       case Op::Illegal: return illegal();
     }
     return illegal();
@@ -420,21 +495,29 @@ class Executor {
     const bool is_rw = d_.op == Op::Csrrw || d_.op == Op::Csrrwi;
     const bool writes = is_rw || d_.rs1 != 0;
 
-    if (!csr_permitted(num, h_.priv, writes)) return illegal();
+    if (!csr_access_allowed(m_, num, h_.priv, writes)) return illegal();
     uint64_t old = 0;
     // Our CSR reads have no side effects, so reading also checks existence
     // when rd=x0 suppresses the architectural read.
     if (!csr_read(m_, num, old)) return illegal();
     if (writes) {
       const bool is_rs = d_.op == Op::Csrrs || d_.op == Op::Csrrsi;
-      const uint64_t v = is_rw ? src : is_rs ? (old | src) : (old & ~src);
+      const uint64_t base = csr_rmw_base(m_, num, old);
+      const uint64_t v = is_rw ? src : is_rs ? (base | src) : (base & ~src);
       if (!csr_write(m_, num, v)) return illegal();
       if constexpr (kTrace) {
+        const CsrLogTargets t = csr_log_targets(num);
         uint64_t now = 0;
-        csr_read(m_, num, now);
+        csr_read(m_, t.first, now);
         rec_.flags |= RV_TF_CSR;
-        rec_.csr = num;
+        rec_.csr = t.first;
         rec_.csr_value = now;
+        if (t.second != 0) {
+          csr_read(m_, t.second, now);
+          rec_.flags |= RV_TF_CSR2;
+          rec_.csr2 = t.second;
+          rec_.csr2_value = now;
+        }
       }
     }
     wr(old);
@@ -453,9 +536,49 @@ class Executor {
     if (mpp != kPrivM) s &= ~mstatus::kMPRV;
     c.mstatus = s;
     h_.priv = mpp;
-    uint64_t epc = 0;
-    csr_read(m_, csrno::kMepc, epc);
-    next_ = epc;
+    next_ = c.mepc;
+    log_mstatus();
+    return ok();
+  }
+
+  // SRET (Priv §3.3.2): pop the S-mode interrupt stack. Illegal in U-mode,
+  // and in S-mode when mstatus.TSR is set (Priv §3.1.6.5). Leaving for a
+  // mode below M clears MPRV (Priv 1.12 §3.1.6.3).
+  Exception sret() {
+    Csrs& c = h_.csr;
+    if (h_.priv == kPrivU || (h_.priv == kPrivS && (c.mstatus & mstatus::kTSR) != 0)) return illegal();
+    const Priv spp = (c.mstatus & mstatus::kSPP) ? kPrivS : kPrivU;
+    uint64_t s = c.mstatus;
+    s = (s & ~mstatus::kSIE) | ((s & mstatus::kSPIE) ? mstatus::kSIE : 0);
+    s |= mstatus::kSPIE;
+    s &= ~(mstatus::kSPP | mstatus::kMPRV);
+    c.mstatus = s;
+    h_.priv = spp;
+    next_ = c.sepc;
+    log_mstatus();
+    return ok();
+  }
+
+  // WFI (Priv §3.3.3): with mstatus.TW set it is illegal below M-mode; with
+  // S-mode implemented it is illegal in U-mode (ADR-009). Otherwise it
+  // retires and the hart waits for an interrupt (see loop()).
+  Exception wfi() {
+    if (h_.priv < kPrivM && (h_.csr.mstatus & mstatus::kTW) != 0) return illegal();
+    if (h_.priv == kPrivU) return illegal();
+    m_->in_wfi = true;
+    return ok();
+  }
+
+  // SFENCE.VMA (Priv §4.2.1, §3.1.6.5): illegal in U-mode, and in S-mode
+  // when mstatus.TVM is set; otherwise permitted. With no TLB yet it does
+  // nothing (ADR-016).
+  Exception sfence_vma() const {
+    if (h_.priv == kPrivU) return illegal();
+    if (h_.priv == kPrivS && (h_.csr.mstatus & mstatus::kTVM) != 0) return illegal();
+    return ok();
+  }
+
+  void log_mstatus() {
     if constexpr (kTrace) {
       uint64_t now = 0;
       csr_read(m_, csrno::kMstatus, now);
@@ -463,7 +586,6 @@ class Executor {
       rec_.csr = csrno::kMstatus;
       rec_.csr_value = now;
     }
-    return ok();
   }
 
   rv_machine* m_;
@@ -481,6 +603,11 @@ Step step(rv_machine* m) {
   if constexpr (kTrace) {
     rec.pc = h.pc;
     rec.priv = h.priv;
+  }
+
+  // Pending interrupts are taken between instructions (Priv §3.1.9).
+  if (const uint64_t irq = pending_interrupt(m); irq != 0) {
+    return take_trap<kTrace>(m, raise(irq, 0), rec);
   }
 
   // Fetch one parcel, then a second if the first says the instruction is 32
@@ -510,6 +637,7 @@ Step step(rv_machine* m) {
   if (Exception e = ex.execute(); e.raised()) return take_trap<kTrace>(m, e, rec);
 
   h.pc = ex.next_pc();
+  bump_counters(h.csr);
   m->instret++;
   m->steps++;
   if constexpr (kTrace) {
@@ -522,6 +650,12 @@ Step step(rv_machine* m) {
 template <bool kTrace>
 rv_exit_reason loop(rv_machine* m, uint64_t end) {
   while (m->steps < end) {
+    // A hart in WFI stays idle until an interrupt is pending; the VMM decides
+    // how much virtual time passes (rv_advance_idle).
+    if (m->in_wfi) {
+      if (!wfi_wakeup(m)) return RV_EXIT_WFI;
+      m->in_wfi = false;
+    }
     // Each step emits exactly one trace record; stop while there is room for none.
     if constexpr (kTrace) {
       if (m->trace_len == m->trace_cap) return RV_EXIT_TRACE_FULL;
@@ -541,6 +675,9 @@ void reset_hart(rv_machine* m) {
   m->steps = 0;
   m->instret = 0;
   m->htif_halt = false;
+  m->in_wfi = false;
+  m->mtimecmp = 0;
+  m->mtime_offset = 0;
   m->reservation = kNoReservation;
 }
 
@@ -553,7 +690,7 @@ void run(rv_machine* m, uint64_t max_steps) {
   m->exit.pc = m->hart.pc;
   m->exit.steps = m->steps;
   m->exit.instret = m->instret;
-  m->exit.timer_step = UINT64_MAX;  // No CLINT yet (Phase 4).
+  m->exit.timer_step = timer_step(m);
   if (reason == RV_EXIT_HALT) {
     m->htif_halt = false;
     m->exit.addr = m->cfg.htif_tohost;

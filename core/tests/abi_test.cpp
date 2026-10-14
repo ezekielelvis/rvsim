@@ -95,7 +95,7 @@ TEST_F(Machine, RunFromEmptyRamReportsBudget) {
   EXPECT_EQ(e->reason, RV_EXIT_BUDGET);
   EXPECT_EQ(e->steps, 1000u);
   EXPECT_EQ(e->instret, 0u);
-  EXPECT_EQ(e->timer_step, UINT64_MAX);
+  EXPECT_EQ(e->timer_step, e->steps);  // mtimecmp resets to 0: the timer is already due
 }
 
 TEST_F(Machine, ZeroBudgetExitsWithBudget) {
@@ -139,8 +139,8 @@ TEST_F(Machine, PrivResetsToMachineAndRejectsReservedEncoding) {
   uint64_t v = 0;
   ASSERT_EQ(rv_get_reg(m_, RV_REG_PRIV, &v), RV_OK);
   EXPECT_EQ(v, 3u);
-  EXPECT_EQ(rv_set_reg(m_, RV_REG_PRIV, 2), RV_E_INVAL);
-  EXPECT_EQ(rv_set_reg(m_, RV_REG_PRIV, 1), RV_E_INVAL);  // no S-mode yet
+  EXPECT_EQ(rv_set_reg(m_, RV_REG_PRIV, 2), RV_E_INVAL);  // reserved (H)
+  EXPECT_EQ(rv_set_reg(m_, RV_REG_PRIV, 1), RV_OK);
   EXPECT_EQ(rv_set_reg(m_, RV_REG_PRIV, 0), RV_OK);
 }
 

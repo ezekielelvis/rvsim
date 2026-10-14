@@ -4,6 +4,7 @@
 #include <initializer_list>
 #include <new>
 
+#include "clint/clint.hpp"
 #include "csr/csr.hpp"
 #include "machine.hpp"
 #include "rv.h"
@@ -11,7 +12,6 @@
 namespace {
 
 constexpr uint64_t kPageSize = 4096;
-constexpr uint64_t kClintSize = 0x10000;
 
 bool valid_config(const rv_config& c) {
   for (uint64_t r : c.reserved) {
@@ -21,10 +21,10 @@ bool valid_config(const rv_config& c) {
   if (c.ram_size == 0 || c.ram_size % kPageSize != 0) return false;
   if (c.ram_base % kPageSize != 0) return false;
   if (c.ram_base + c.ram_size < c.ram_base) return false;  // wraps
-  if (c.clint_base % kClintSize != 0) return false;
+  if (c.clint_base % rv::kClintSize != 0) return false;
   if (c.steps_per_tick == 0) return false;
   // CLINT must not overlap RAM.
-  if (c.clint_base < c.ram_base + c.ram_size && c.ram_base < c.clint_base + kClintSize) {
+  if (c.clint_base < c.ram_base + c.ram_size && c.ram_base < c.clint_base + rv::kClintSize) {
     return false;
   }
   // HTIF mailboxes are 8-byte words in RAM.
@@ -95,11 +95,14 @@ int rv_complete_mmio(rv_machine* m, uint64_t /*read_value*/, int /*access_fault*
   return RV_E_UNSUPPORTED;
 }
 
-int rv_advance_idle(rv_machine* m, uint64_t /*steps*/) {
+int rv_advance_idle(rv_machine* m, uint64_t steps) {
   if (m == nullptr) return RV_E_INVAL;
   if (m->poisoned) return RV_E_POISONED;
   if (!m->in_wfi) return RV_E_STATE;
-  return RV_E_UNSUPPORTED;
+  // Idle time advances virtual time (ADR-001) but retires nothing, so
+  // mcycle and minstret do not move (ADR-015).
+  m->steps = steps > UINT64_MAX - m->steps ? UINT64_MAX : m->steps + steps;
+  return RV_OK;
 }
 
 int rv_set_irq_lines(rv_machine* m, uint64_t lines) {
@@ -139,8 +142,8 @@ int rv_set_reg(rv_machine* m, uint32_t reg, uint64_t value) {
   } else if (reg == RV_REG_PC) {
     m->hart.pc = value;
   } else if (reg == RV_REG_PRIV) {
-    // Only implemented modes: M and U until S-mode arrives in Phase 3.
-    if (value != rv::kPrivM && value != rv::kPrivU) return RV_E_INVAL;
+    // Priv §1.2: encoding 2 is reserved (no hypervisor extension).
+    if (value != rv::kPrivM && value != rv::kPrivS && value != rv::kPrivU) return RV_E_INVAL;
     m->hart.priv = static_cast<rv::Priv>(value);
   } else if (reg >= RV_REG_CSR && reg <= RV_REG_CSR + 0xfff) {
     const auto csr = static_cast<uint16_t>(reg - RV_REG_CSR);
@@ -155,14 +158,27 @@ int rv_set_reg(rv_machine* m, uint32_t reg, uint64_t value) {
 
 int rv_read_phys(const rv_machine* m, uint64_t paddr, void* buf, size_t len) {
   if (m == nullptr || (buf == nullptr && len != 0)) return RV_E_INVAL;
-  if (!m->ram_contains(paddr, len)) return RV_E_RANGE;  // CLINT: Phase 4.
-  if (len != 0) std::memcpy(buf, m->ram + (paddr - m->cfg.ram_base), len);
-  return RV_OK;
+  if (m->ram_contains(paddr, len)) {
+    if (len != 0) std::memcpy(buf, m->ram + (paddr - m->cfg.ram_base), len);
+    return RV_OK;
+  }
+  // The CLINT accepts aligned 4- and 8-byte accesses, as from the hart.
+  uint64_t v = 0;
+  if (m->clint_contains(paddr, len) && rv::clint_load(m, paddr, len, v)) {
+    std::memcpy(buf, &v, len);
+    return RV_OK;
+  }
+  return RV_E_RANGE;
 }
 
 int rv_write_phys(rv_machine* m, uint64_t paddr, const void* buf, size_t len) {
   if (m == nullptr || (buf == nullptr && len != 0)) return RV_E_INVAL;
-  if (!m->ram_contains(paddr, len)) return RV_E_RANGE;
+  if (!m->ram_contains(paddr, len)) {
+    uint64_t v = 0;
+    std::memcpy(&v, buf, len < 8 ? len : 8);
+    if (m->clint_contains(paddr, len) && rv::clint_store(m, paddr, len, v)) return RV_OK;
+    return RV_E_RANGE;
+  }
   if (len == 0) return RV_OK;
   std::memcpy(m->ram + (paddr - m->cfg.ram_base), buf, len);
   // A write by another agent (DMA, debugger) into the reservation set must

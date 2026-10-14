@@ -85,7 +85,7 @@ typedef struct {
   uint64_t pc;          /* faulting/exiting insn, or next pc for BUDGET/WFI */
   uint64_t steps;       /* virtual time since reset (retired + traps + idle) */
   uint64_t instret;     /* architectural minstret */
-  uint64_t timer_step;  /* step at which MTIP next rises; UINT64_MAX if never */
+  uint64_t timer_step;  /* step at which MTIP rises (= steps if already pending); UINT64_MAX if never */
 } rv_exit;
 
 /* Stable for the machine's lifetime; overwritten by every rv_run. */

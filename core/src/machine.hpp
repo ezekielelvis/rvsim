@@ -25,6 +25,12 @@ struct rv_machine {
   uint64_t steps = 0;
   uint64_t instret = 0;
 
+  // CLINT (clint/clint.hpp). mtimecmp resets to 0, as in Spike, so MTIP is
+  // pending until software programs it. mtime is derived from virtual time;
+  // a write to mtime moves this offset.
+  uint64_t mtimecmp = 0;
+  uint64_t mtime_offset = 0;
+
   // LR/SC reservation: the reserved physical address, or kNoReservation.
   uint64_t reservation = ~0ull;
 
@@ -55,6 +61,14 @@ struct rv_machine {
   }
 
   uint8_t* ram_ptr(uint64_t paddr) { return ram + (paddr - cfg.ram_base); }
+
+  bool clint_contains(uint64_t paddr, size_t len) const {
+    if (paddr < cfg.clint_base) return false;
+    return paddr - cfg.clint_base < 0x10000 && len <= 0x10000 - (paddr - cfg.clint_base);
+  }
+
+  // mtime is derived from virtual time (ADR-001).
+  uint64_t mtime() const { return steps / cfg.steps_per_tick + mtime_offset; }
 };
 
 namespace rv {
@@ -66,5 +80,16 @@ void run(rv_machine* m, uint64_t max_steps);
 
 // Resets architectural state (Priv §3.4). Defined in cpu/execute.cpp.
 void reset_hart(rv_machine* m);
+
+// The step at which MTIP rises (mtime reaches mtimecmp), or the current step
+// if it is already pending; UINT64_MAX if that is beyond the step counter.
+inline uint64_t timer_step(const rv_machine* m) {
+  const uint64_t now = m->mtime();
+  if (now >= m->mtimecmp) return m->steps;
+  const uint64_t spt = m->cfg.steps_per_tick;
+  const uint64_t ticks = m->steps / spt + (m->mtimecmp - now);
+  if (ticks < m->steps / spt || ticks > UINT64_MAX / spt) return UINT64_MAX;
+  return ticks * spt;
+}
 
 }  // namespace rv
