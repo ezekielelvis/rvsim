@@ -56,6 +56,13 @@ func TestSpikeFormat(t *testing.T) {
 			"core   0: 0 0x000000008000015a (0xe006) mem 0x0000000080002000 0x00aa00aa00aa00aa",
 		},
 		{
+			"amo reads then writes",
+			machine.TraceRecord{Kind: machine.TraceCommit, Priv: 0, PC: 0x800001a8, Insn: 0x00b6a72f, InsnLen: 4,
+				Flags: machine.TraceFlagRd | machine.TraceFlagLoad | machine.TraceFlagStore, Rd: 14,
+				RdValue: 0xffffffff80000000, MemAddr: 0x80002000, MemSize: 4, MemValue: 0x7ffff800},
+			"core   0: 0 0x00000000800001a8 (0x00b6a72f) x14 0xffffffff80000000 mem 0x0000000080002000 mem 0x0000000080002000 0x7ffff800",
+		},
+		{
 			"csr write",
 			machine.TraceRecord{Kind: machine.TraceCommit, Priv: 3, PC: 0x80000090, Insn: 0x30529073, InsnLen: 4,
 				Flags: machine.TraceFlagCSR, CSR: 0x305, CSRValue: 0x80000098},

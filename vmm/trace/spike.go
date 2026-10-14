@@ -16,6 +16,7 @@ import (
 //	core   0: 3 0x0000000080000004 (0x0182b283) x5  0x...  mem 0x0000000080001018
 //	core   0: 3 0x0000000080000008 (0x00628023) mem 0x0000000080001000 0x01
 //	core   0: 3 0x000000008000000c (0x30529073) c773_mtvec 0x0000000080000098
+//	core   0: 0 0x00000000800001a8 (0x00b6a72f) x14 0x...  mem 0x...2000 mem 0x...2000 0x7ffff800
 //
 // Traps are not written: Spike does not log them either.
 type SpikeWriter struct {
@@ -79,13 +80,16 @@ func (s *SpikeWriter) format(r *machine.TraceRecord) []byte {
 		b = append(b, ' ')
 		b = appendHex(b, r.CSRValue, 16)
 	}
-	if r.Flags&(machine.TraceFlagLoad|machine.TraceFlagStore) != 0 {
+	// An AMO sets both flags; Spike logs its read and then its write.
+	if r.Flags&machine.TraceFlagLoad != 0 {
 		b = append(b, " mem "...)
 		b = appendHex(b, r.MemAddr, 16)
-		if r.Flags&machine.TraceFlagStore != 0 {
-			b = append(b, ' ')
-			b = appendHex(b, r.MemValue, 2*int(r.MemSize))
-		}
+	}
+	if r.Flags&machine.TraceFlagStore != 0 {
+		b = append(b, " mem "...)
+		b = appendHex(b, r.MemAddr, 16)
+		b = append(b, ' ')
+		b = appendHex(b, r.MemValue, 2*int(r.MemSize))
 	}
 	b = append(b, '\n')
 	s.buf = b
