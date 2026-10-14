@@ -7,7 +7,7 @@ JOBS       ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 GO         ?= go
 CMAKE      ?= cmake
 
-.PHONY: all core core-test go-build go-test lint test sanitize go-asan riscv-tests compliance difftest archtest-elfs archtest platform images linux bench toolchain clean
+.PHONY: all core core-test go-build go-test lint test sanitize go-asan riscv-tests compliance difftest archtest-elfs archtest platform images linux perf bench toolchain clean
 
 all: go-build
 
@@ -76,6 +76,10 @@ images:
 ## linux: boot Linux, record/replay, snapshot and debug it with GDB (needs `make images`)
 linux: core
 	RVSIM_REQUIRE_LINUX=1 $(GO) test -count=1 -v -timeout 60m ./tests/linux ./vmm/gdb
+
+## perf: interpreter MIPS and Linux boot-to-shell time (needs `make images` for the boot)
+perf: core
+	$(GO) test -run XXX -bench . -benchtime 5x ./tests/perf
 
 bench: core
 	$(GO) test -run '^$$' -bench . -benchmem ./...
