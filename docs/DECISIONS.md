@@ -156,14 +156,22 @@ misaligned exception wins. Table 3.7 allows either order.
 
 ---
 
-## ADR-009: WFI in U-mode is illegal
+## ADR-009: WFI rules and idle exits
 
-**Status:** Accepted (Phase 1)
+**Status:** Accepted (Phase 1; idle exits added in Phase 3)
 
 Priv §3.3.3 lets WFI in a less-privileged mode either complete within a
-bounded time or raise illegal-instruction. We raise illegal-instruction in
-U-mode, as Spike does. In M-mode WFI currently completes immediately, which
-the spec allows; idle exits (`RV_EXIT_WFI`) arrive in Phase 3.
+bounded time or raise illegal-instruction. rvsim, like Spike:
+
+- raises illegal-instruction below M-mode when `mstatus.TW` = 1;
+- raises it in U-mode, since S-mode is implemented;
+- otherwise retires WFI and leaves the hart idle.
+
+An idle hart makes `rv_run` return `RV_EXIT_WFI` without using any steps. The
+VMM then advances virtual time with `rv_advance_idle`. The hart resumes once
+an interrupt is pending in `mip & mie`, whatever the global enables and
+delegation say. If that interrupt is enabled it is taken, with `xepc` pointing
+after the WFI.
 
 ---
 
@@ -185,6 +193,14 @@ difference shows up as a divergence. Spike is invoked with:
 
 Spike's boot-ROM commits (pc below RAM) are skipped. Spike keeps running
 briefly after the HTIF exit store, so only rvsim's log length is compared.
+
+**Phase 3 additions:** Spike runs with `_zicntr`, `--priv=MSU`, and a
+device tree whose `mmu-type` is `riscv,sbare` until Phase 5 (ADR-016).
+Commits that read `mvendorid`/`marchid`/`mimpid` are compared without the
+value read, since implementation IDs rightly differ (Spike's `marchid` is 5).
+Tests excluded from difftest only, with their reasons in
+`tests/riscvtests/riscvtests.go`: `rv64mi-p-ma_fetch` (Spike's `misa.C` is
+writable; rvsim's `misa` is read-only) and `rv64mi-p-illegal` (ADR-016).
 
 **Phase 1 scope note:** the riscv-tests environment uses CSRs, `mret`,
 U-mode and `ecall` before any RV64I test code runs. So Phase 1 includes a
@@ -288,8 +304,158 @@ the expected results into the test.
 - **Unprivileged tests only for now** (`include_priv_tests: False`). The
   privileged parameters (counters, `mtvec` write behaviour, U-mode details)
   become accurate when the privileged tests are enabled in Phase 3.
+- **Phase 3:** privileged tests are enabled. The config declares S, U, Zicntr,
+  Svbare and a standard M-mode (`STANDARD_SM_SUPPORTED`). The interrupt
+  suites (`InterruptsSm/S/U`) are excluded until the CLINT/PLIC interrupt
+  hooks exist in Phase 4. Sdtrig stays excluded, as in ACT4's defaults.
 - **Pinned versions:** ACT4 commit `d40cf3d` (2026-09-28) and Sail 0.14.1,
   the version that commit's own CI uses. Its README names 0.15, released
   2026-10-06.
 - **Pass criterion:** a test passes only if it prints
   `RVCP-SUMMARY: TEST PASSED` and then exits with code 0.
+
+---
+
+## ADR-015: Counters follow Spike's CPI = 1 model
+
+**Status:** Accepted (Phase 3). Refines ADR-001.
+
+ADR-001 said `mcycle` counts steps. Spike, the difftest reference, advances
+`mcycle` and `minstret` together, once per retired instruction. Traps and idle
+time count for neither. riscv-tests read `cycle` and `instret` into registers,
+so any other model shows up as a difftest divergence. So:
+
+- `mcycle` and `minstret` advance once per retired instruction, unless
+  `mcountinhibit.CY`/`IR` is set.
+- An explicit CSR write to either one replaces that instruction's own
+  increment, so software reads back what it wrote.
+- Virtual time is unchanged from ADR-001. Steps still include traps and
+  idle time, and `time`/`mtime` = steps / `steps_per_tick` (+ offset,
+  ADR-020).
+- `rv_exit.instret` counts retired instructions since reset. Writes to
+  `minstret` do not affect it.
+- Zicntr: `cycle`, `time` and `instret` are accessible below M-mode only
+  when `mcounteren` allows (and, in U-mode, `scounteren` too).
+  `mcountinhibit` has CY and IR.
+
+---
+
+## ADR-016: S-mode before the MMU
+
+**Status:** Accepted (Phase 3; superseded for each field when Sv39 lands in
+Phase 5)
+
+S-mode exists from Phase 3, but address translation only arrives in Phase 5.
+Until then:
+
+- `satp` is read-only Bare. A write naming an unsupported mode has no effect
+  (Priv §4.1.11).
+- `mstatus.SUM` and `menvcfg`/`senvcfg.FIOM` are read-only zero. Priv
+  §3.1.6.3 allows SUM to be when `satp.MODE` is read-only zero.
+- `mstatus.MXR` and `TVM` are writable. Priv §3.1.6.3 and §3.1.6.5 make them
+  read-only zero only when S-mode is absent. TVM traps `satp` accesses and
+  SFENCE.VMA in S-mode.
+- SFENCE.VMA is permitted in S-mode and M-mode when TVM = 0 (§3.1.6.5). It
+  does nothing yet, because there is no TLB.
+
+Spike without an MMU makes MXR and TVM read-only and SFENCE.VMA illegal.
+Sail and the ACT4 certification tests follow the spec text, as rvsim does.
+So `rv64mi-p-illegal` is excluded from difftest only (it passes in
+compliance) until Phase 5, when both models have Sv39 and agree again.
+Difftest gives Spike a device tree with `mmu-type = "riscv,sbare"` to match.
+
+---
+
+## ADR-017: Trace record format v2
+
+**Status:** Accepted (Phase 3). Supersedes the layout in ADR-011.
+
+Spike logs a `sie` write as two entries, `c260_sie` and `c772_mie`. Records grow
+from 56 to 64 bytes, adding `csr2`/`csr2_value` and the `RV_TF_CSR2` flag
+(`RV_TRACE_VERSION` 2). The CSR entries follow Spike's logging:
+
+| CSR written | Logged as |
+|---|---|
+| `sstatus` | `mstatus` (full value) |
+| `sip` | `mip` |
+| `sie` | `sie`, then `mie` |
+| any other | itself |
+
+Difftest also removes Spike's `c777_mvip` entries. Spike implements `mip`
+through the AIA `mvip` register, and rvsim has no AIA.
+
+---
+
+## ADR-018: A reserved xtvec MODE leaves the register unchanged
+
+**Status:** Accepted (Phase 3)
+
+MODE values 2 and 3 in `mtvec`/`stvec` are reserved (Priv §3.1.7), and WARL
+allows any legal result. rvsim ignores such a write entirely
+(`MTVEC_ILLEGAL_WRITE_BEHAVIOR: retain`). This is what Sail does, and so what
+the ACT4 tests expect. Spike instead clears bit 1. No riscv-tests program
+writes a reserved MODE.
+
+---
+
+## ADR-019: No hardware performance counters
+
+**Status:** Accepted (Phase 3)
+
+rvsim implements no HPM counters. `mhpmcounter3–31` and `mhpmevent3–31`
+raise illegal-instruction, and so do `hpmcounter3–31` (no Zihpm).
+`mcounteren`/`scounteren`/`mcountinhibit` have only the CY/TM/IR bits.
+RISC-V's UDB defines `mhpmcounterN`/`mhpmeventN` only when
+`HPM_COUNTER_EN[N]` is set, and Sail and the ACT4 tests follow that. Priv 1.12
+§3.1.10 also allows read-only-zero registers, which is Spike's choice. OpenSBI
+probes these CSRs with trap-guarded accesses, so both work.
+
+Sail's `medeleg`/`mideleg` delegatable masks and `writable_fiom` in
+`tests/archtest/rvsim-rv64imac/sail.json` are set to rvsim's own choices:
+`medeleg` 0x3FE, `mideleg` 0x222, FIOM read-only zero without an MMU.
+
+---
+
+## ADR-020: The CLINT's MMIO window is in the core from Phase 3
+
+**Status:** Accepted (Phase 3; brought forward from Phase 4)
+
+ACT4's standard M-mode boot writes `mtimecmp`, so the privileged tests need
+the CLINT's memory-mapped registers. The CLINT was always going to be in C++
+(ADR-001), and needs no MMIO exits, so it arrived a phase early. It uses the
+SiFive layout of QEMU virt, Spike and OpenSBI:
+
+| Register | Offset | Notes |
+|---|---|---|
+| `msip` | `+0x0000` | 32-bit; bit 0 drives `mip.MSIP` |
+| `mtimecmp` | `+0x4000` | 64-bit |
+| `mtime` | `+0xBFF8` | 64-bit |
+
+- Aligned 4- and 8-byte accesses work; byte and halfword accesses raise
+  access faults, as do atomics. Unmapped offsets read as zero and ignore
+  writes.
+- `mtime` = steps / `steps_per_tick` + an offset, which a write to `mtime`
+  sets. Virtual time stays deterministic.
+- MTIP = `mtime >= mtimecmp`. `mtimecmp` resets to 0, as in Spike, so MTIP is
+  pending until software programs it.
+- `rv_exit.timer_step` is the step at which MTIP rises, or the current step
+  if it is already pending.
+- `rv_read_phys`/`rv_write_phys` reach the CLINT with the same rules.
+
+---
+
+## ADR-021: Go must relink when the C++ core changes
+
+**Status:** Accepted (Phase 3)
+
+Go's build cache tracks Go sources and flags, not the `librvcore.a` named in
+`#cgo LDFLAGS`, and it keys a link on the *compiled* contents of its
+dependencies. After a C++-only change, `go build`/`go test` could link
+against stale core code without any error. This happened during Phase 3:
+`bin/rvsim` kept running old CSR masks.
+
+The fix: after every core build, CMake writes `vmm/machine/zz_corehash.go`
+(gitignored). It sets a package variable to the library's SHA-256 in
+`init()`, which puts the hash into the compiled package so dependents relink.
+`rvsim version` prints it as the core build ID. CI builds from scratch, so
+earlier pushed results were not affected.
