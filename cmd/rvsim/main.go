@@ -20,6 +20,8 @@ const usage = `usage: rvsim <command> [flags]
 
 commands:
   boot      boot OpenSBI and a Linux kernel
+  record    boot and record the session for replay
+  replay    replay a recorded session and check it is identical
   run       run a bare-metal ELF that exits through HTIF tohost
   version   print the rvsim and core ABI versions
 
@@ -34,6 +36,10 @@ func main() {
 	switch os.Args[1] {
 	case "boot":
 		os.Exit(bootCmd(os.Args[2:]))
+	case "record":
+		os.Exit(recordCmd(os.Args[2:]))
+	case "replay":
+		os.Exit(replayCmd(os.Args[2:]))
 	case "run":
 		os.Exit(runCmd(os.Args[2:]))
 	case "version":
@@ -124,33 +130,20 @@ func bootCmd(args []string) int {
 			"go straight to the image file.\n\nflags:\n")
 		fs.PrintDefaults()
 	}
-	firmware := fs.String("firmware", "", "OpenSBI fw_jump `binary`, loaded at the start of RAM")
-	kernel := fs.String("kernel", "", "Linux `Image`, loaded at RAM + 2 MiB")
-	initrd := fs.String("initrd", "", "initramfs `file` (cpio)")
-	disk := fs.String("disk", "", "disk `image` for a virtio block device (/dev/vda in Linux)")
-	diskRO := fs.Bool("disk-ro", false, "make the disk read-only")
-	appendArgs := fs.String("append", "", "kernel command `line` (default \"console=ttyS0 earlycon\", plus\n\"root=/dev/vda rw\" with -disk and no -initrd)")
-	memMiB := fs.Uint64("mem", 256, "RAM size in `MiB`")
+	flags := addImageFlags(fs)
 	maxSteps := fs.Uint64("max-steps", 0, "stop after `n` steps (0: no limit)")
 	tracePath := fs.String("trace", "", traceUsage)
 	fs.Parse(args)
-	if fs.NArg() != 0 || *firmware == "" || *kernel == "" {
+	if fs.NArg() != 0 || *flags.firmware == "" || *flags.kernel == "" {
 		fs.Usage()
 		return 2
 	}
 
-	var img boot.Images
-	img.Bootargs = *appendArgs
-	if img.Bootargs == "" {
-		img.Bootargs = "console=ttyS0 earlycon"
-		if *disk != "" && *initrd == "" {
-			img.Bootargs += " root=/dev/vda rw"
-		}
-	}
+	img := boot.Images{Bootargs: flags.bootargs()}
 	for _, f := range []struct {
 		path string
 		dst  *[]byte
-	}{{*firmware, &img.Firmware}, {*kernel, &img.Kernel}, {*initrd, &img.Initrd}} {
+	}{{*flags.firmware, &img.Firmware}, {*flags.kernel, &img.Kernel}, {*flags.initrd, &img.Initrd}} {
 		if f.path == "" {
 			continue
 		}
@@ -169,10 +162,10 @@ func bootCmd(args []string) int {
 	defer closeTrace()
 
 	cfg := machine.DefaultConfig()
-	cfg.RAMSize = *memMiB << 20
+	cfg.RAMSize = *flags.memMiB << 20
 	vcfg := vm.Config{Machine: cfg, Console: os.Stdout, Input: readInput(os.Stdin), Trace: trace}
-	if *disk != "" {
-		d, closeDisk, err := openDisk(*disk, *diskRO)
+	if *flags.disk != "" {
+		d, closeDisk, err := openDisk(*flags.disk, *flags.diskRO)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "rvsim:", err)
 			return 1
