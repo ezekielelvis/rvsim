@@ -85,3 +85,5 @@ done < <(grep -E '^(# )?CONFIG_' /src/linux.config)
 cp /work/out/images/fw_jump.bin /work/out/images/Image /work/out/images/rootfs.cpio \
   /work/out/images/rootfs.ext4 /out/
 cp "$kconfig" /out/linux.config.resolved
+# The kernel with symbols, for GDB (Phase 10).
+cp /work/out/build/linux-6.12.112/vmlinux /out/vmlinux
