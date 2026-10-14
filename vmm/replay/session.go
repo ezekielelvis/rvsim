@@ -598,3 +598,23 @@ func (s *Session) Replay() (Report, error) {
 	}
 	return rep, nil
 }
+
+// EndStep returns the step at which the recording at path ends: its END
+// record, or for a truncated recording its last checkpoint.
+func EndStep(path string) (uint64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	_, recs, err := Read(f)
+	if err != nil && !errors.Is(err, ErrTruncated) {
+		return 0, err
+	}
+	for i := len(recs) - 1; i >= 0; i-- {
+		if recs[i].Tag == TagEnd || recs[i].Tag == TagCheckpoint {
+			return recs[i].Step, nil
+		}
+	}
+	return 0, errors.New("replay: the recording has no checkpoints and no end")
+}
