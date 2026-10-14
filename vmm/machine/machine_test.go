@@ -51,7 +51,8 @@ func TestRunToHTIFHalt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	want := Exit{Reason: ExitHalt, Addr: 0x8000_1000, Value: 42, PC: 0x8000_0008, Steps: 2, Instret: 2, TimerStep: ^uint64(0)}
+	// mtimecmp resets to 0, so the timer is already due: TimerStep = Steps.
+	want := Exit{Reason: ExitHalt, Addr: 0x8000_1000, Value: 42, PC: 0x8000_0008, Steps: 2, Instret: 2, TimerStep: 2}
 	if exit != want {
 		t.Fatalf("Run exit = %+v, want %+v", exit, want)
 	}
@@ -119,6 +120,7 @@ func TestRegisters(t *testing.T) {
 		{"x1", 1, 0x1234, 0x1234},
 		{"x31", 31, ^uint64(0), ^uint64(0)},
 		{"pc", RegPC, 0x8000_1000, 0x8000_1000},
+		{"priv S", RegPriv, 1, 1},
 		{"priv U", RegPriv, 0, 0},
 	}
 	for _, tt := range tests {
@@ -138,8 +140,8 @@ func TestRegisters(t *testing.T) {
 	if _, err := m.Reg(34); !errors.Is(err, StatusRange) {
 		t.Fatalf("Reg(34) err = %v, want %v", err, StatusRange)
 	}
-	if v, err := m.Reg(RegCSR(0x300)); err != nil || v != 2<<32 {
-		t.Fatalf("Reg(mstatus) = %#x, %v; want UXL=2 only", v, err)
+	if v, err := m.Reg(RegCSR(0x300)); err != nil || v != 2<<32|2<<34 {
+		t.Fatalf("Reg(mstatus) = %#x, %v; want UXL=SXL=2 only", v, err)
 	}
 	if _, err := m.Reg(RegCSR(0x7c0)); !errors.Is(err, StatusRange) {
 		t.Fatalf("Reg(unimplemented CSR) err = %v, want %v", err, StatusRange)

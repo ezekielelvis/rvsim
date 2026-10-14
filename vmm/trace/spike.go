@@ -73,12 +73,10 @@ func (s *SpikeWriter) format(r *machine.TraceRecord) []byte {
 		b = appendHex(b, r.RdValue, 16)
 	}
 	if r.Flags&machine.TraceFlagCSR != 0 {
-		b = append(b, " c"...)
-		b = strconv.AppendUint(b, uint64(r.CSR), 10)
-		b = append(b, '_')
-		b = append(b, CSRName(r.CSR)...)
-		b = append(b, ' ')
-		b = appendHex(b, r.CSRValue, 16)
+		b = appendCSR(b, r.CSR, r.CSRValue)
+	}
+	if r.Flags&machine.TraceFlagCSR2 != 0 {
+		b = appendCSR(b, r.CSR2, r.CSR2Value)
 	}
 	// An AMO sets both flags; Spike logs its read and then its write.
 	if r.Flags&machine.TraceFlagLoad != 0 {
@@ -94,6 +92,15 @@ func (s *SpikeWriter) format(r *machine.TraceRecord) []byte {
 	b = append(b, '\n')
 	s.buf = b
 	return b
+}
+
+func appendCSR(b []byte, csr uint16, v uint64) []byte {
+	b = append(b, " c"...)
+	b = strconv.AppendUint(b, uint64(csr), 10)
+	b = append(b, '_')
+	b = append(b, CSRName(csr)...)
+	b = append(b, ' ')
+	return appendHex(b, v, 16)
 }
 
 // appendHex appends "0x" and v as lowercase hex, zero-padded to digits.

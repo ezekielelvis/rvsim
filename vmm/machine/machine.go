@@ -24,6 +24,13 @@ import (
 // ABIVersion is the rv.h ABI version this package was compiled against.
 const ABIVersion = uint32(C.RV_ABI_VERSION)
 
+// coreLibHash is the SHA-256 of the linked librvcore.a, set by the generated
+// zz_corehash.go. It also makes Go relink whenever the C++ core changes.
+var coreLibHash string
+
+// CoreBuild identifies the linked core library build, or "" if unknown.
+func CoreBuild() string { return coreLibHash }
+
 // Status is an rv_status code returned by the core.
 type Status int32
 
@@ -143,22 +150,24 @@ type Exit struct {
 }
 
 // TraceRecord mirrors rv_trace_record (core/include/rv_trace.h). Its layout
-// is checked against the C struct in tests.
+// is checked against the C struct at compile time below.
 type TraceRecord struct {
-	PC       uint64
-	Insn     uint32
-	Kind     uint8 // TraceCommit or TraceTrap
-	Priv     uint8
-	InsnLen  uint8
-	Flags    uint8 // TraceFlag*
-	Rd       uint8
-	MemSize  uint8
-	CSR      uint16
-	_        uint32
-	RdValue  uint64 // TraceTrap: cause
-	CSRValue uint64 // TraceTrap: handler pc
-	MemAddr  uint64 // TraceTrap: tval
-	MemValue uint64
+	PC        uint64
+	Insn      uint32
+	Kind      uint8 // TraceCommit or TraceTrap
+	Priv      uint8
+	InsnLen   uint8
+	Flags     uint8 // TraceFlag*
+	Rd        uint8
+	MemSize   uint8
+	CSR       uint16
+	CSR2      uint16
+	_         uint16
+	RdValue   uint64 // TraceTrap: cause
+	CSRValue  uint64 // TraceTrap: handler pc
+	MemAddr   uint64 // TraceTrap: tval
+	MemValue  uint64
+	CSR2Value uint64
 }
 
 // Compile-time checks that TraceRecord matches rv_trace_record: indexing a
@@ -168,6 +177,8 @@ var (
 	_ = [1]struct{}{}[unsafe.Offsetof(TraceRecord{}.CSR)-unsafe.Offsetof(C.rv_trace_record{}.csr)]
 	_ = [1]struct{}{}[unsafe.Offsetof(TraceRecord{}.RdValue)-unsafe.Offsetof(C.rv_trace_record{}.rd_value)]
 	_ = [1]struct{}{}[unsafe.Offsetof(TraceRecord{}.MemValue)-unsafe.Offsetof(C.rv_trace_record{}.mem_value)]
+	_ = [1]struct{}{}[unsafe.Offsetof(TraceRecord{}.CSR2)-unsafe.Offsetof(C.rv_trace_record{}.csr2)]
+	_ = [1]struct{}{}[unsafe.Offsetof(TraceRecord{}.CSR2Value)-unsafe.Offsetof(C.rv_trace_record{}.csr2_value)]
 )
 
 // Trace record kinds and flags.
@@ -179,6 +190,7 @@ const (
 	TraceFlagCSR   = uint8(C.RV_TF_CSR)
 	TraceFlagLoad  = uint8(C.RV_TF_LOAD)
 	TraceFlagStore = uint8(C.RV_TF_STORE)
+	TraceFlagCSR2  = uint8(C.RV_TF_CSR2)
 )
 
 // Register numbers for Reg/SetReg (RV_REG_*). GPRs are 0..31.

@@ -69,6 +69,12 @@ func TestSpikeFormat(t *testing.T) {
 			"core   0: 3 0x0000000080000090 (0x30529073) c773_mtvec 0x0000000080000098",
 		},
 		{
+			"sie logs sie and mie",
+			machine.TraceRecord{Kind: machine.TraceCommit, Priv: 1, PC: 0x8000014a, Insn: 0x10416073, InsnLen: 4,
+				Flags: machine.TraceFlagCSR | machine.TraceFlagCSR2, CSR: 0x104, CSRValue: 2, CSR2: 0x304, CSR2Value: 2},
+			"core   0: 1 0x000000008000014a (0x10416073) c260_sie 0x0000000000000002 c772_mie 0x0000000000000002",
+		},
+		{
 			"register and csr",
 			machine.TraceRecord{Kind: machine.TraceCommit, Priv: 3, PC: 0x80000008, Insn: 0x34029373, InsnLen: 4,
 				Flags: machine.TraceFlagRd | machine.TraceFlagCSR, Rd: 6, CSR: 0x340, CSRValue: 0x1888},

@@ -12,7 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RV_TRACE_VERSION 1u
+#define RV_TRACE_VERSION 2u
 
 enum {
   RV_TRACE_COMMIT = 1, /* an instruction retired */
@@ -24,6 +24,7 @@ enum {
 #define RV_TF_CSR   2u  /* csr, csr_value: a CSR was written (explicitly or by xRET) */
 #define RV_TF_LOAD  4u  /* mem_addr, mem_size */
 #define RV_TF_STORE 8u  /* mem_addr, mem_size, mem_value */
+#define RV_TF_CSR2  16u /* csr2, csr2_value: a second CSR changed by the same write (e.g. sie -> mie) */
 
 typedef struct {
   uint64_t pc;
@@ -35,17 +36,19 @@ typedef struct {
   uint8_t  rd;        /* COMMIT: destination GPR. TRAP: privilege trapped into */
   uint8_t  mem_size;  /* 1, 2, 4 or 8 */
   uint16_t csr;
-  uint32_t reserved;
+  uint16_t csr2;      /* csr < csr2 when both are present */
+  uint16_t reserved;
   uint64_t rd_value;  /* TRAP: xcause */
   uint64_t csr_value; /* TRAP: handler pc */
   uint64_t mem_addr;  /* TRAP: xtval */
   uint64_t mem_value;
+  uint64_t csr2_value;
 } rv_trace_record;
 
 #ifdef __cplusplus
-static_assert(sizeof(rv_trace_record) == 56, "rv_trace_record layout is ABI");
+static_assert(sizeof(rv_trace_record) == 64, "rv_trace_record layout is ABI");
 #else
-_Static_assert(sizeof(rv_trace_record) == 56, "rv_trace_record layout is ABI");
+_Static_assert(sizeof(rv_trace_record) == 64, "rv_trace_record layout is ABI");
 #endif
 
 #endif /* RVSIM_RV_TRACE_H */
