@@ -9,6 +9,7 @@
 #include "machine.hpp"
 #include "mmu/mmu.hpp"
 #include "rv.h"
+#include "state/state.hpp"
 
 namespace {
 
@@ -274,7 +275,14 @@ int rv_core_snapshot_load(rv_machine* m, const void* buf, size_t) {
 int rv_state_hash(rv_machine* m, uint32_t what, uint64_t* hash_out) {
   if (m == nullptr || hash_out == nullptr) return RV_E_INVAL;
   if (what == 0 || (what & ~(RV_HASH_CORE | RV_HASH_RAM)) != 0) return RV_E_INVAL;
-  return RV_E_UNSUPPORTED;
+  if (what == RV_HASH_CORE) {
+    *hash_out = rv::state::hash_core(*m);
+  } else if (what == RV_HASH_RAM) {
+    *hash_out = rv::state::hash_ram(*m);
+  } else {
+    *hash_out = rv::state::hash_both(*m);
+  }
+  return RV_OK;
 }
 
 }  // extern "C"

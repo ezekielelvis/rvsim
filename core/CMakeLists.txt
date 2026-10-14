@@ -31,11 +31,14 @@ add_library(rvcore STATIC
   src/csr/csr.cpp
   src/decode/decode.cpp
   src/mmu/mmu.cpp
+  src/state/state.cpp
 )
 target_include_directories(rvcore
   PUBLIC include
   PRIVATE src
 )
+# Vendored xxHash v0.8.3 (BSD-2-Clause), outside our warning flags.
+target_include_directories(rvcore SYSTEM PRIVATE third_party/xxhash)
 target_compile_options(rvcore PRIVATE ${RVSIM_WARNINGS} -fno-exceptions -fno-rtti)
 
 # Tell Go when the library changes (see cmake/write_corehash.cmake).
@@ -69,6 +72,7 @@ if(RVSIM_BUILD_TESTS)
     tests/header_c_test.c
     tests/memory_test.cpp
     tests/mmu_test.cpp
+    tests/state_test.cpp
     tests/mmio_test.cpp
     tests/muldiv_test.cpp
     tests/privileged_test.cpp

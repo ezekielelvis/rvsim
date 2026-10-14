@@ -167,7 +167,9 @@ int rv_core_snapshot_load(rv_machine* m, const void* buf, size_t len);
 #define RV_HASH_CORE 1u
 #define RV_HASH_RAM  2u
 /* Fixed algorithm (XXH3-64 vendored, pinned) over a canonical little-endian
- * serialization; identical across hosts. */
+ * serialization; identical across hosts. RV_HASH_RAM is XXH3-64 of the RAM
+ * bytes; RV_HASH_CORE|RV_HASH_RAM is XXH3-64 of {core, ram} as two
+ * little-endian u64s. */
 int rv_state_hash(rv_machine* m, uint32_t what, uint64_t* hash_out);
 
 #ifdef __cplusplus
