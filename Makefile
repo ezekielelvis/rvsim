@@ -73,9 +73,9 @@ platform: core
 images:
 	tests/images/build-images.sh
 
-## linux: boot Linux to a BusyBox shell and run commands (needs `make images`)
+## linux: boot Linux, record/replay, snapshot and debug it with GDB (needs `make images`)
 linux: core
-	RVSIM_REQUIRE_LINUX=1 $(GO) test -count=1 -v -timeout 60m ./tests/linux
+	RVSIM_REQUIRE_LINUX=1 $(GO) test -count=1 -v -timeout 60m ./tests/linux ./vmm/gdb
 
 bench: core
 	$(GO) test -run '^$$' -bench . -benchmem ./...

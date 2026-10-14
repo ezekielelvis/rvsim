@@ -117,9 +117,12 @@ jobs:
         env:
           CONTAINER_ENGINE: docker
         run: make images
-      - name: Boot Linux; record and replay a session
+      - name: Install GDB with RISC-V support
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gdb-multiarch
+      - name: Boot Linux; record, replay, snapshot and debug it
         env:
           RVSIM_RECORDING_OUT: ${{ github.workspace }}/build/session.rvrec
+          RVSIM_REQUIRE_GDB: 1
         run: make linux
       - name: Hand the recording and images to the replay job
         uses: actions/upload-artifact@v4
