@@ -72,12 +72,16 @@ done
 make -C /work/out BR2_JLEVEL="$jobs"
 echo "$hash" > /work/out/.src-hash
 
-# The kernel must not use the FPU: rvsim has no F/D.
+# Every option linux.config sets must survive into the kernel's resolved
+# configuration (Kconfig drops unmet ones silently); among them, no FPU.
 kconfig=/work/out/build/linux-6.12.112/.config
-if grep -q '^CONFIG_FPU=y' "$kconfig"; then
-  echo "container-build: kernel config enables the FPU" >&2
-  exit 1
-fi
+while IFS= read -r line; do
+  if ! grep -qxF "$line" "$kconfig"; then
+    echo "container-build: linux.config line not in the resolved config: $line" >&2
+    exit 1
+  fi
+done < <(grep -E '^(# )?CONFIG_' /src/linux.config)
 
-cp /work/out/images/fw_jump.bin /work/out/images/Image /work/out/images/rootfs.cpio /out/
+cp /work/out/images/fw_jump.bin /work/out/images/Image /work/out/images/rootfs.cpio \
+  /work/out/images/rootfs.ext4 /out/
 cp "$kconfig" /out/linux.config.resolved
