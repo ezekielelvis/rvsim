@@ -10,12 +10,15 @@ import (
 	"os"
 
 	"github.com/ezekielelvis/rvsim/vmm/baremetal"
+	"github.com/ezekielelvis/rvsim/vmm/boot"
 	"github.com/ezekielelvis/rvsim/vmm/machine"
+	"github.com/ezekielelvis/rvsim/vmm/vm"
 )
 
 const usage = `usage: rvsim <command> [flags]
 
 commands:
+  boot      boot OpenSBI and a Linux kernel
   run       run a bare-metal ELF that exits through HTIF tohost
   version   print the rvsim and core ABI versions
 
@@ -28,6 +31,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "boot":
+		os.Exit(bootCmd(os.Args[2:]))
 	case "run":
 		os.Exit(runCmd(os.Args[2:]))
 	case "version":
@@ -54,7 +59,7 @@ func runCmd(args []string) int {
 			"(tohost>>1), or 1 on an emulator error.\n\nflags:\n")
 		fs.PrintDefaults()
 	}
-	tracePath := fs.String("trace", "", "write a Spike --log-commits style commit log to `file` (- for stdout)")
+	tracePath := fs.String("trace", "", traceUsage)
 	maxSteps := fs.Uint64("max-steps", 100_000_000, "stop with an error after `n` steps")
 	misaligned := fs.Bool("misaligned", false, "perform misaligned loads/stores instead of trapping")
 	stdin := fs.Bool("stdin", false, "feed standard input to the guest's UART")
@@ -71,21 +76,13 @@ func runCmd(args []string) int {
 	if *misaligned {
 		opt.Flags |= machine.FlagMisalignedOK
 	}
-	if *tracePath != "" {
-		var w io.Writer = os.Stdout
-		if *tracePath != "-" {
-			f, err := os.Create(*tracePath)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "rvsim:", err)
-				return 1
-			}
-			defer f.Close()
-			bw := bufio.NewWriter(f)
-			defer bw.Flush()
-			w = bw
-		}
-		opt.Trace = w
+	trace, closeTrace, err := openTrace(*tracePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rvsim:", err)
+		return 1
 	}
+	defer closeTrace()
+	opt.Trace = trace
 
 	res, err := baremetal.RunFile(fs.Arg(0), opt)
 	if err != nil {
@@ -94,6 +91,99 @@ func runCmd(args []string) int {
 	}
 	if res.ExitCode != 0 {
 		fmt.Fprintf(os.Stderr, "rvsim: program exited with code %d after %d instructions\n", res.ExitCode, res.Instret)
+	}
+	return int(min(res.ExitCode, 255))
+}
+
+const traceUsage = "write a Spike --log-commits style commit log to `file` (- for stdout)"
+
+// openTrace opens the -trace destination; a nil writer means no trace.
+func openTrace(path string) (io.Writer, func(), error) {
+	switch path {
+	case "":
+		return nil, func() {}, nil
+	case "-":
+		return os.Stdout, func() {}, nil
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	bw := bufio.NewWriter(f)
+	return bw, func() { bw.Flush(); f.Close() }, nil
+}
+
+func bootCmd(args []string) int {
+	fs := flag.NewFlagSet("boot", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), "usage: rvsim boot [flags] -firmware fw_jump.bin -kernel Image\n\n"+
+			"Boots OpenSBI fw_jump and a Linux Image (with an optional initramfs) on the\n"+
+			"rvsim platform. The UART is the console: its output goes to stdout and\n"+
+			"standard input is fed to it.\n\nflags:\n")
+		fs.PrintDefaults()
+	}
+	firmware := fs.String("firmware", "", "OpenSBI fw_jump `binary`, loaded at the start of RAM")
+	kernel := fs.String("kernel", "", "Linux `Image`, loaded at RAM + 2 MiB")
+	initrd := fs.String("initrd", "", "initramfs `file` (cpio)")
+	appendArgs := fs.String("append", "console=ttyS0 earlycon", "kernel command `line`")
+	memMiB := fs.Uint64("mem", 256, "RAM size in `MiB`")
+	maxSteps := fs.Uint64("max-steps", 0, "stop after `n` steps (0: no limit)")
+	tracePath := fs.String("trace", "", traceUsage)
+	fs.Parse(args)
+	if fs.NArg() != 0 || *firmware == "" || *kernel == "" {
+		fs.Usage()
+		return 2
+	}
+
+	var img boot.Images
+	img.Bootargs = *appendArgs
+	for _, f := range []struct {
+		path string
+		dst  *[]byte
+	}{{*firmware, &img.Firmware}, {*kernel, &img.Kernel}, {*initrd, &img.Initrd}} {
+		if f.path == "" {
+			continue
+		}
+		b, err := os.ReadFile(f.path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "rvsim:", err)
+			return 1
+		}
+		*f.dst = b
+	}
+	trace, closeTrace, err := openTrace(*tracePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rvsim:", err)
+		return 1
+	}
+	defer closeTrace()
+
+	cfg := machine.DefaultConfig()
+	cfg.RAMSize = *memMiB << 20
+	v, err := vm.New(vm.Config{Machine: cfg, Console: os.Stdout, Input: readInput(os.Stdin), Trace: trace})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rvsim:", err)
+		return 1
+	}
+	defer v.Close()
+	if err := boot.Load(v, cfg, img); err != nil {
+		fmt.Fprintln(os.Stderr, "rvsim:", err)
+		return 1
+	}
+	limit := *maxSteps
+	if limit == 0 {
+		limit = ^uint64(0)
+	}
+	res, err := v.Run(limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rvsim: %v (after %d steps)\n", err, res.Steps)
+		return 1
+	}
+	switch {
+	case !res.Exited:
+		fmt.Fprintf(os.Stderr, "rvsim: stopped after %d steps\n", res.Steps)
+	case res.Reset:
+		fmt.Fprintf(os.Stderr, "rvsim: guest requested a reboot after %d steps; stopping\n", res.Steps)
 	}
 	return int(min(res.ExitCode, 255))
 }
