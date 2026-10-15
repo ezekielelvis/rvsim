@@ -9,9 +9,9 @@ machine, at any speed, under a debugger or not.
 The emulator is a C++ interpreter core (`core/`) driven by a Go VMM
 (`vmm/`) that owns the devices, virtual time and the run loop.
 
-![demo: booting Linux, recording a session and replaying it](docs/demo.gif)
-
-*(The demo GIF is a placeholder until one is recorded.)*
+**[See it in action](https://ezekielelvis.github.io/rvsim/)**: a guided tour of one real
+session: booting Linux, replaying it exactly, a divergence report, a trace, snapshots,
+reverse debugging in GDB and fault injection. The page's source is `site/index.html`.
 
 ## Why determinism, and why fault injection
 
